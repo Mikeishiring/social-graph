@@ -311,6 +311,23 @@ class Frame(Base):
     )
 
 
+class PostAttribution(Base):
+    """Derived post attribution summary for UI overlays."""
+    __tablename__ = "post_attributions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    post_id: Mapped[str] = mapped_column(ForeignKey("posts.post_id"), index=True)
+    interval_id: Mapped[Optional[int]] = mapped_column(ForeignKey("intervals.interval_id"), index=True, nullable=True)
+    timeframe_window: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    payload_json: Mapped[str] = mapped_column(Text)
+    built_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("post_id", "timeframe_window", name="uq_post_attribution"),
+    )
+
+
 # =============================================================================
 # INDEXES
 # =============================================================================
@@ -320,3 +337,4 @@ Index("ix_posts_created_at", Post.created_at)
 Index("ix_interaction_events_created", InteractionEvent.created_at)
 Index("ix_intervals_time", Interval.start_at, Interval.end_at)
 Index("ix_position_history_interval_account", PositionHistory.interval_id, PositionHistory.account_id, PositionHistory.recorded_at)
+Index("ix_post_attributions_timeframe_created", PostAttribution.timeframe_window, PostAttribution.created_at)

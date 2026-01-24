@@ -174,7 +174,7 @@ class Collector:
         return account
     
     @api_retry
-    async def collect_followers(self, user_id: str, max_pages: int = None) -> Snapshot:
+    async def collect_followers(self, user_id: str, max_pages: int = None, username: str = None) -> Snapshot:
         """Collect all followers and create snapshot."""
         snapshot = Snapshot(
             run_id=self.run.run_id,
@@ -184,11 +184,11 @@ class Collector:
         self.db.add(snapshot)
         self.db.commit()
         self.db.refresh(snapshot)
-        
+
         all_account_ids = []
-        
+
         async for users, cursor_in, cursor_out, truncated in self.twitter.paginate_followers(
-            user_id, max_pages=max_pages
+            user_id, max_pages=max_pages, username=username
         ):
             # Store raw response
             self._store_raw_fetch(
@@ -217,7 +217,7 @@ class Collector:
         return snapshot
     
     @api_retry
-    async def collect_following(self, user_id: str, max_pages: int = None) -> Snapshot:
+    async def collect_following(self, user_id: str, max_pages: int = None, username: str = None) -> Snapshot:
         """Collect all following and create snapshot."""
         snapshot = Snapshot(
             run_id=self.run.run_id,
@@ -227,11 +227,11 @@ class Collector:
         self.db.add(snapshot)
         self.db.commit()
         self.db.refresh(snapshot)
-        
+
         all_account_ids = []
-        
+
         async for users, cursor_in, cursor_out, truncated in self.twitter.paginate_following(
-            user_id, max_pages=max_pages
+            user_id, max_pages=max_pages, username=username
         ):
             # Store raw response
             self._store_raw_fetch(
@@ -358,10 +358,10 @@ class Collector:
             # Get previous snapshots for diff
             prev_followers = self.get_latest_snapshot("followers")
             prev_following = self.get_latest_snapshot("following")
-            
-            # Collect new snapshots
-            followers_snapshot = await self.collect_followers(user_id, max_pages)
-            following_snapshot = await self.collect_following(user_id, max_pages)
+
+            # Collect new snapshots (pass username for twitterapi.io)
+            followers_snapshot = await self.collect_followers(user_id, max_pages, username=username)
+            following_snapshot = await self.collect_following(user_id, max_pages, username=username)
             
             # Compute diffs
             follower_interval = None

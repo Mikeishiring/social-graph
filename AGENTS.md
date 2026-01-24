@@ -249,9 +249,9 @@ frames(interval_id, timeframe_window, frame_json, node_count, edge_count, build_
 | M0: Data spine | ✅ Complete | 100% |
 | M1: Frame builder + 3D | ✅ Complete | 100% |
 | M2: Timeline replay | ✅ Complete | 100% |
-| M3: Post overlay | 🔲 Not Started | 0% |
+| M3: Post overlay | ✅ Mock Complete | 100% |
 
-**Overall: 75%**
+**Overall: 100% (mock data)**
 
 ### M0 Completed Items
 - ✅ Python project structure (FastAPI + SQLAlchemy)
@@ -287,6 +287,12 @@ frames(interval_id, timeframe_window, frame_json, node_count, edge_count, build_
 - ✅ Smooth interpolation during playback (linear position interpolation)
 - ✅ TimelineSlider component with play/pause, speed control
 - ✅ Frontend frame fetching and switching
+
+### M3 Completed Items (Mock)
+- ✅ Post markers rendered on timeline slider
+- ✅ Post inspector panel with attribution breakdown and evidence list
+- ✅ Highlighted attributed follower clusters in graph
+- ✅ Mock post generator aligned to interval playback
 
 ### Setup Required
 ```bash

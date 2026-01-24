@@ -11,6 +11,8 @@ from .models import Run, Snapshot, Interval, Account, FollowEvent
 from .collector import Collector
 from .twitter_client import TwitterClient
 from .frame_builder import FrameBuilder
+from .mock_posts import generate_mock_posts
+from .post_attribution import build_post_attributions
 
 
 app = FastAPI(
@@ -401,6 +403,38 @@ async def get_graph_data(
 
 
 # =============================================================================
+# M3 Post Overlay Endpoints (Mock)
+# =============================================================================
+
+@app.get("/posts")
+async def list_posts(
+    timeframe_window: int = 30,
+    limit: int = 50,
+    mode: str = "auto",
+    rebuild: bool = False,
+    db: Session = Depends(get_db)
+):
+    """
+    Get posts with attribution summaries for timeline overlay.
+    Mode:
+    - auto: return computed posts if available, fallback to mock.
+    - real: return computed posts only.
+    - mock: return mock posts only.
+    """
+    if mode not in {"mock", "auto", "real"}:
+        raise HTTPException(status_code=400, detail="mode must be 'mock', 'auto', or 'real'")
+
+    if mode == "mock":
+        return generate_mock_posts(db, timeframe_window, limit)
+
+    computed = build_post_attributions(db, timeframe_window, limit, rebuild=rebuild)
+    if computed or mode == "real":
+        return computed
+
+    return generate_mock_posts(db, timeframe_window, limit)
+
+
+# =============================================================================
 # M2 Timeline Endpoints - Frame Interpolation Support
 # =============================================================================
 
@@ -539,11 +573,11 @@ async def get_position_history(
     Useful for analyzing node movement and stability.
     """
     from .models import PositionHistory
-    
+
     history = db.query(PositionHistory).filter(
         PositionHistory.account_id == account_id
     ).order_by(PositionHistory.recorded_at.desc()).limit(limit).all()
-    
+
     return [
         {
             "interval_id": h.interval_id,
@@ -555,3 +589,102 @@ async def get_position_history(
         }
         for h in history
     ]
+
+
+# =============================================================================
+# Profile Data Refresh Endpoints
+# =============================================================================
+
+@app.post("/accounts/refresh")
+async def refresh_account_profiles(
+    batch_size: int = 50,
+    skip_with_avatar: bool = True,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Refresh profile data (avatars, bios) for accounts.
+    Fetches fresh data from Twitter API.
+
+    Args:
+        batch_size: Number of accounts to refresh per call (max 200)
+        skip_with_avatar: If True, only refresh accounts missing avatar_url
+    """
+    from datetime import datetime, timezone
+
+    batch_size = min(batch_size, 200)
+
+    # Query accounts needing refresh
+    query = db.query(Account)
+    if skip_with_avatar:
+        query = query.filter(Account.avatar_url == None)
+
+    accounts = query.order_by(Account.last_seen_at.desc().nullsfirst()).limit(batch_size).all()
+
+    if not accounts:
+        return {
+            "message": "No accounts need refresh",
+            "refreshed": 0,
+            "remaining": 0
+        }
+
+    # Get remaining count
+    remaining_query = db.query(Account)
+    if skip_with_avatar:
+        remaining_query = remaining_query.filter(Account.avatar_url == None)
+    remaining = remaining_query.count() - len(accounts)
+
+    # Refresh each account
+    refreshed = 0
+    errors = []
+
+    async with TwitterClient() as client:
+        for account in accounts:
+            if not account.handle:
+                continue
+
+            try:
+                user_data = await client.get_user_by_username(account.handle)
+
+                if user_data and user_data.get("id"):
+                    # Update account data
+                    account.avatar_url = user_data.get("profile_image_url")
+                    account.bio = user_data.get("description")
+                    account.name = user_data.get("name")
+
+                    public_metrics = user_data.get("public_metrics", {})
+                    account.followers_count = public_metrics.get("followers_count", account.followers_count)
+                    account.following_count = public_metrics.get("following_count", account.following_count)
+
+                    account.last_seen_at = datetime.now(timezone.utc)
+                    refreshed += 1
+
+            except Exception as e:
+                errors.append({"handle": account.handle, "error": str(e)})
+
+    db.commit()
+
+    return {
+        "message": f"Refreshed {refreshed} accounts",
+        "refreshed": refreshed,
+        "remaining": remaining,
+        "errors": errors[:10] if errors else []
+    }
+
+
+@app.get("/accounts/stats")
+async def get_account_stats(db: Session = Depends(get_db)):
+    """Get statistics about account data completeness."""
+    total = db.query(Account).count()
+    with_avatar = db.query(Account).filter(Account.avatar_url != None).count()
+    with_bio = db.query(Account).filter(Account.bio != None).count()
+    with_handle = db.query(Account).filter(Account.handle != None).count()
+
+    return {
+        "total_accounts": total,
+        "with_avatar": with_avatar,
+        "missing_avatar": total - with_avatar,
+        "with_bio": with_bio,
+        "with_handle": with_handle,
+        "completeness_pct": round(with_avatar / total * 100, 1) if total > 0 else 0
+    }

@@ -45,6 +45,13 @@ python -m social_graph runs
 
 # List intervals
 python -m social_graph intervals
+
+# Build post attributions
+python -m social_graph posts
+python -m social_graph posts --rebuild --timeframe 30 --limit 50
+
+# Seed mock posts into the cache
+python -m social_graph posts --seed-mock --rebuild --timeframe 30 --limit 50
 ```
 
 ## API Server
@@ -64,6 +71,7 @@ API Endpoints:
 - `GET /intervals/{id}/events` - Get interval events
 - `GET /accounts` - List accounts
 - `GET /stats` - Get statistics
+- `GET /posts` - Post overlay data (auto/mock/real via `mode`, optional `rebuild`)
 
 ## Schema
 

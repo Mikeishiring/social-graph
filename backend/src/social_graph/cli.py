@@ -7,6 +7,8 @@ import json
 from .database import init_db, SessionLocal
 from .collector import Collector
 from .models import Run, Snapshot, Interval, Account
+from .post_attribution import build_post_attributions
+from .mock_posts import seed_mock_post_attributions
 
 
 def cmd_init(args):
@@ -159,6 +161,59 @@ def cmd_intervals(args):
         db.close()
 
 
+def cmd_posts(args):
+    """Build or list post attributions."""
+    init_db()
+    db = SessionLocal()
+
+    try:
+        if args.seed_mock:
+            results = seed_mock_post_attributions(
+                db,
+                timeframe_window=args.timeframe,
+                limit=args.limit,
+                rebuild=args.rebuild,
+            )
+        else:
+            results = build_post_attributions(
+                db,
+                timeframe_window=args.timeframe,
+                limit=args.limit,
+                rebuild=args.rebuild,
+            )
+
+        if args.json:
+            print(json.dumps(results, indent=2))
+            return
+
+        print("Post attributions")
+        print("=" * 40)
+        print(f"Timeframe: {args.timeframe}d")
+        print(f"Limit: {args.limit}")
+        print(f"Rebuild: {'yes' if args.rebuild else 'no'}")
+        print(f"Seed mock: {'yes' if args.seed_mock else 'no'}")
+        print("-" * 40)
+
+        if not results:
+            print("No attributions found")
+            return
+
+        for post in results:
+            handle = post.get("id", "unknown")
+            created_at = post.get("created_at", "unknown")
+            attribution = post.get("attribution", {})
+            total = attribution.get("high", 0) + attribution.get("medium", 0) + attribution.get("low", 0)
+            text = (post.get("text") or "").replace("\n", " ").strip()
+            if len(text) > 80:
+                text = f"{text[:77]}..."
+            print(f"- {handle} ({created_at})")
+            print(f"  Followers attributed: {total} (H/M/L {attribution.get('high', 0)}/{attribution.get('medium', 0)}/{attribution.get('low', 0)})")
+            if text:
+                print(f"  {text}")
+    finally:
+        db.close()
+
+
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -190,6 +245,15 @@ def main():
     intervals_parser = subparsers.add_parser("intervals", help="List intervals")
     intervals_parser.add_argument("--limit", type=int, default=10, help="Number of intervals")
     intervals_parser.set_defaults(func=cmd_intervals)
+
+    # posts
+    posts_parser = subparsers.add_parser("posts", help="Build post attributions")
+    posts_parser.add_argument("--timeframe", type=int, default=30, help="Timeframe window in days")
+    posts_parser.add_argument("--limit", type=int, default=20, help="Number of posts to include")
+    posts_parser.add_argument("--rebuild", action="store_true", help="Rebuild cached attributions")
+    posts_parser.add_argument("--seed-mock", action="store_true", help="Seed mock posts into the cache")
+    posts_parser.add_argument("--json", action="store_true", help="Output full attribution payloads")
+    posts_parser.set_defaults(func=cmd_posts)
     
     args = parser.parse_args()
     

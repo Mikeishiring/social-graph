@@ -2,7 +2,7 @@
  * API client for Social Graph backend
  */
 
-import type { GraphData, ApiStats, FrameSummary } from './types';
+import type { GraphData, ApiStats, FrameSummary, PostMarker } from './types';
 
 const API_BASE = '/api';
 
@@ -178,6 +178,37 @@ export async function fetchPositionHistory(
     return await response.json();
   } catch (error) {
     console.error('Failed to fetch position history:', error);
+    return [];
+  }
+}
+
+/**
+ * Fetch posts and attribution summaries for timeline overlay
+ */
+export async function fetchPosts(
+  timeframeWindow: number = 30,
+  limit: number = 50,
+  mode: 'auto' | 'real' | 'mock' = 'auto',
+  rebuild: boolean = false
+): Promise<PostMarker[]> {
+  try {
+    const params = new URLSearchParams({
+      timeframe_window: timeframeWindow.toString(),
+      limit: limit.toString(),
+      mode,
+    });
+    if (rebuild) {
+      params.append('rebuild', 'true');
+    }
+    const response = await fetch(
+      `${API_BASE}/posts?${params.toString()}`
+    );
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Failed to fetch posts:', error);
     return [];
   }
 }

@@ -1,4 +1,4 @@
-"""Twitter API v2 client for data collection."""
+"""TwitterAPI.io client for data collection."""
 import hashlib
 import json
 from datetime import datetime
@@ -18,180 +18,229 @@ class TwitterAPIError(Exception):
 
 
 class TwitterClient:
-    """Twitter API v2 client with pagination support."""
-    
-    BASE_URL = "https://api.twitter.com/2"
-    
-    USER_FIELDS = "id,name,username,profile_image_url,description,public_metrics,created_at"
-    TWEET_FIELDS = "id,text,created_at,public_metrics,conversation_id,in_reply_to_user_id,referenced_tweets"
-    
-    def __init__(self, bearer_token: str = None):
-        self.bearer_token = bearer_token or settings.twitter_bearer_token
+    """TwitterAPI.io client with pagination support."""
+
+    BASE_URL = "https://api.twitterapi.io"
+
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or settings.twitter_bearer_token
         self.client = httpx.AsyncClient(
             base_url=self.BASE_URL,
-            headers={"Authorization": f"Bearer {self.bearer_token}"},
-            timeout=30.0
+            headers={"X-API-Key": self.api_key},
+            timeout=60.0
         )
-    
+
     async def close(self):
         """Close the HTTP client."""
         await self.client.aclose()
-    
+
     async def __aenter__(self):
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
-    
+
     def _params_hash(self, params: dict) -> str:
         """Generate hash of request parameters."""
         sorted_params = json.dumps(params, sort_keys=True)
         return hashlib.sha256(sorted_params.encode()).hexdigest()[:16]
-    
+
     async def _request(
-        self, 
-        method: str, 
-        endpoint: str, 
+        self,
+        method: str,
+        endpoint: str,
         params: dict = None
-    ) -> tuple[dict, dict]:
-        """Make API request, return (data, raw_response)."""
+    ) -> dict:
+        """Make API request, return response data."""
         response = await self.client.request(method, endpoint, params=params)
-        
+
         if response.status_code == 429:
             raise TwitterAPIError(429, "Rate limited", response.json())
-        
+
         if response.status_code != 200:
             try:
                 error_data = response.json()
             except:
                 error_data = {"error": response.text}
             raise TwitterAPIError(response.status_code, str(error_data), error_data)
-        
+
         return response.json()
-    
-    async def get_me(self) -> dict:
-        """Get authenticated user info."""
-        params = {"user.fields": self.USER_FIELDS}
-        data = await self._request("GET", "/users/me", params)
-        return data.get("data", {})
-    
+
     async def get_user_by_username(self, username: str) -> dict:
         """Get user by username."""
-        params = {"user.fields": self.USER_FIELDS}
-        data = await self._request("GET", f"/users/by/username/{username}", params)
-        return data.get("data", {})
-    
+        data = await self._request("GET", "/twitter/user/info", params={"userName": username})
+        user_data = data.get("data", {})
+        # Normalize to standard format
+        return {
+            "id": user_data.get("id"),
+            "username": user_data.get("userName"),
+            "name": user_data.get("name"),
+            "profile_image_url": user_data.get("profilePicture"),
+            "description": user_data.get("description", ""),
+            "public_metrics": {
+                "followers_count": user_data.get("followers", 0),
+                "following_count": user_data.get("following", 0),
+            },
+            "created_at": user_data.get("createdAt"),
+        }
+
     async def paginate_followers(
         self,
         user_id: str,
-        max_results: int = 1000,
-        max_pages: int = None
+        max_results: int = 200,
+        max_pages: int = None,
+        username: str = None
     ) -> AsyncGenerator[tuple[list[dict], str, str, bool], None]:
         """
         Paginate through followers.
         Yields: (users, cursor_in, cursor_out, truncated)
         """
-        params = {
-            "user.fields": self.USER_FIELDS,
-            "max_results": min(max_results, 1000)
-        }
-        
         cursor = None
         page_count = 0
-        
+
         while True:
+            params = {
+                "userName": username,
+                "pageSize": min(max_results, 200)
+            }
             if cursor:
-                params["pagination_token"] = cursor
-            
+                params["cursor"] = cursor
+
             cursor_in = cursor
-            data = await self._request("GET", f"/users/{user_id}/followers", params)
-            
-            users = data.get("data", [])
-            meta = data.get("meta", {})
-            cursor_out = meta.get("next_token")
-            
+            data = await self._request("GET", "/twitter/user/followers", params)
+
+            # Normalize user data from twitterapi.io format
+            raw_users = data.get("followers", [])
+            users = [self._normalize_user(u) for u in raw_users]
+
+            cursor_out = data.get("next_cursor")
+
             page_count += 1
             truncated = max_pages and page_count >= max_pages and cursor_out is not None
-            
+
             yield (users, cursor_in, cursor_out, truncated)
-            
+
             if not cursor_out or (max_pages and page_count >= max_pages):
                 break
-            
+
             cursor = cursor_out
-    
+
     async def paginate_following(
         self,
         user_id: str,
-        max_results: int = 1000,
-        max_pages: int = None
+        max_results: int = 200,
+        max_pages: int = None,
+        username: str = None
     ) -> AsyncGenerator[tuple[list[dict], str, str, bool], None]:
         """
         Paginate through following.
         Yields: (users, cursor_in, cursor_out, truncated)
         """
-        params = {
-            "user.fields": self.USER_FIELDS,
-            "max_results": min(max_results, 1000)
-        }
-        
         cursor = None
         page_count = 0
-        
+
         while True:
+            params = {
+                "userName": username,
+                "pageSize": min(max_results, 200)
+            }
             if cursor:
-                params["pagination_token"] = cursor
-            
+                params["cursor"] = cursor
+
             cursor_in = cursor
-            data = await self._request("GET", f"/users/{user_id}/following", params)
-            
-            users = data.get("data", [])
-            meta = data.get("meta", {})
-            cursor_out = meta.get("next_token")
-            
+            data = await self._request("GET", "/twitter/user/followings", params)
+
+            # Normalize user data from twitterapi.io format
+            raw_users = data.get("followings", [])
+            users = [self._normalize_user(u) for u in raw_users]
+
+            cursor_out = data.get("next_cursor")
+
             page_count += 1
             truncated = max_pages and page_count >= max_pages and cursor_out is not None
-            
+
             yield (users, cursor_in, cursor_out, truncated)
-            
+
             if not cursor_out or (max_pages and page_count >= max_pages):
                 break
-            
+
             cursor = cursor_out
-    
+
+    def _normalize_user(self, user: dict) -> dict:
+        """Normalize twitterapi.io user format to standard format."""
+        return {
+            "id": user.get("id"),
+            "username": user.get("userName"),
+            "name": user.get("name"),
+            "profile_image_url": user.get("profilePicture"),
+            "description": user.get("description", ""),
+            "public_metrics": {
+                "followers_count": user.get("followers", 0),
+                "following_count": user.get("following", 0),
+            },
+            "created_at": user.get("createdAt"),
+        }
+
     async def get_user_tweets(
         self,
         user_id: str,
         since_id: str = None,
-        max_results: int = 100
+        max_results: int = 100,
+        username: str = None
     ) -> list[dict]:
         """Get recent tweets from user."""
         params = {
-            "tweet.fields": self.TWEET_FIELDS,
-            "max_results": min(max_results, 100),
-            "exclude": "retweets"
+            "userName": username,
+            "pageSize": min(max_results, 100)
         }
-        if since_id:
-            params["since_id"] = since_id
-        
-        data = await self._request("GET", f"/users/{user_id}/tweets", params)
-        return data.get("data", [])
-    
+
+        data = await self._request("GET", "/twitter/user/tweets", params)
+        tweets = data.get("tweets", [])
+
+        # Normalize tweets
+        return [
+            {
+                "id": t.get("id"),
+                "text": t.get("text"),
+                "created_at": t.get("createdAt"),
+                "public_metrics": {
+                    "like_count": t.get("likeCount", 0),
+                    "retweet_count": t.get("retweetCount", 0),
+                    "reply_count": t.get("replyCount", 0),
+                },
+            }
+            for t in tweets
+        ]
+
     async def get_mentions(
         self,
         user_id: str,
         since_id: str = None,
-        max_results: int = 100
-    ) -> list[dict]:
+        max_results: int = 100,
+        username: str = None
+    ) -> dict:
         """Get tweets mentioning the user."""
         params = {
-            "tweet.fields": self.TWEET_FIELDS,
-            "expansions": "author_id",
-            "user.fields": self.USER_FIELDS,
-            "max_results": min(max_results, 100)
+            "userName": username,
+            "pageSize": min(max_results, 100)
         }
-        if since_id:
-            params["since_id"] = since_id
-        
-        data = await self._request("GET", f"/users/{user_id}/mentions", params)
+
+        data = await self._request("GET", "/twitter/user/mentions", params)
         return data
+
+    async def get_users_bulk(self, usernames: list[str]) -> list[dict]:
+        """
+        Get user info for multiple usernames.
+        Returns list of normalized user data.
+        """
+        results = []
+        for username in usernames:
+            try:
+                user = await self.get_user_by_username(username)
+                if user and user.get("id"):
+                    results.append(user)
+            except TwitterAPIError as e:
+                # Skip users that fail (suspended, not found, etc.)
+                if e.status_code not in (404, 403):
+                    raise
+        return results

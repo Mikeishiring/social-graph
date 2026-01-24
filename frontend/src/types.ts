@@ -40,6 +40,33 @@ export interface GraphData {
   stats: GraphStats;
 }
 
+export interface PostMetrics {
+  likes: number;
+  replies: number;
+  reposts: number;
+  quotes: number;
+}
+
+export interface PostAttribution {
+  high: number;
+  medium: number;
+  low: number;
+}
+
+export interface PostMarker {
+  id: string;
+  interval_id: number;
+  created_at: string;
+  text: string;
+  metrics: PostMetrics;
+  attribution: PostAttribution;
+  evidence: string[];
+  follower_delta: number;
+  attributed_follower_ids: string[];
+  community_ids: number[];
+  is_mock?: boolean;
+}
+
 export interface ApiStats {
   total_runs: number;
   completed_runs: number;

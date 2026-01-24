@@ -51,6 +51,7 @@ CO_ENGAGEMENT_WINDOW_HOURS = 72
 MAX_NODES_RENDERED = 2000
 MAX_EDGES_RENDERED = 12000
 MAX_EDGES_PER_NODE = 50
+MIN_FOLLOWERS_FOR_DISPLAY = 100  # Filter out very small accounts to reduce lag
 
 
 @dataclass
@@ -212,12 +213,12 @@ def build_ego_follow_edges(
     """
     if not ego_id:
         return []
-    
+
     follow_events = db.query(FollowEvent).filter(
         FollowEvent.interval_id == interval.interval_id,
         FollowEvent.kind == "new"
     ).all()
-    
+
     return [
         GraphEdge(
             src_id=ego_id,
@@ -228,6 +229,130 @@ def build_ego_follow_edges(
         )
         for fe in follow_events
     ]
+
+
+def build_edges_from_follow_events(
+    db: Session,
+    interval: Interval,
+    existing_node_ids: Set[str] = None
+) -> List[GraphEdge]:
+    """
+    Build edges connecting new followers to the existing network.
+
+    Strategy:
+    1. Connect new followers to EXISTING nodes (from previous intervals)
+       based on follower count similarity - this makes the graph grow outward
+    2. Connect new followers to each other in small clusters
+    """
+    from .models import SnapshotFollower, Snapshot
+
+    # Get new followers in this interval
+    new_followers = db.query(FollowEvent).filter(
+        FollowEvent.interval_id == interval.interval_id,
+        FollowEvent.kind == "new"
+    ).all()
+
+    if not new_followers:
+        return []
+
+    new_ids = set(fe.account_id for fe in new_followers)
+
+    # Get existing nodes from previous intervals (nodes that aren't new)
+    if existing_node_ids is None:
+        # Query all accounts that were followers before this interval
+        prev_snapshots = db.query(Snapshot).filter(
+            Snapshot.kind == "followers",
+            Snapshot.captured_at < interval.start_at
+        ).all()
+
+        existing_node_ids = set()
+        for snap in prev_snapshots:
+            for sf in snap.followers:
+                existing_node_ids.add(sf.account_id)
+
+    # Remove new IDs from existing (they're new, not existing)
+    existing_node_ids = existing_node_ids - new_ids
+
+    # Get account data for all relevant accounts
+    all_ids = list(new_ids | existing_node_ids)
+    accounts = db.query(Account).filter(
+        Account.account_id.in_(all_ids)
+    ).all()
+    account_map = {a.account_id: a for a in accounts}
+
+    edges = []
+
+    # 1. Connect each new follower to nearby EXISTING nodes (growth edges)
+    # This creates the "growing outward" effect
+    existing_list = list(existing_node_ids)
+
+    for new_id in new_ids:
+        new_acc = account_map.get(new_id)
+        if not new_acc:
+            continue
+
+        new_followers_count = new_acc.followers_count or 1
+
+        # Find best matches in existing network based on follower tier
+        candidates = []
+        for exist_id in existing_list:
+            exist_acc = account_map.get(exist_id)
+            if not exist_acc:
+                continue
+
+            exist_followers = exist_acc.followers_count or 1
+
+            # Calculate tier similarity (log scale)
+            ratio = max(new_followers_count, exist_followers) / max(min(new_followers_count, exist_followers), 1)
+
+            # Score: prefer similar tier accounts
+            if ratio < 100:  # Within 2 orders of magnitude
+                score = 1.0 / (1 + math.log10(ratio + 1))
+                candidates.append((exist_id, score))
+
+        # Connect to top 3-5 most similar existing nodes
+        candidates.sort(key=lambda x: -x[1])
+        for exist_id, score in candidates[:5]:
+            edges.append(GraphEdge(
+                src_id=exist_id,  # Existing node as source
+                dst_id=new_id,    # New node as target (grows outward)
+                edge_type="network_growth",
+                weight=score
+            ))
+
+    # 2. Connect new followers to each other in small clusters
+    # (accounts that joined together likely have affinity)
+    new_list = list(new_ids)
+    for i, id1 in enumerate(new_list):
+        acc1 = account_map.get(id1)
+        if not acc1:
+            continue
+        f1 = acc1.followers_count or 1
+
+        # Only connect to a few nearby new nodes (limit clustering)
+        connections = 0
+        for id2 in new_list[i+1:]:
+            if connections >= 3:  # Max 3 peer connections per node
+                break
+
+            acc2 = account_map.get(id2)
+            if not acc2:
+                continue
+            f2 = acc2.followers_count or 1
+
+            ratio = max(f1, f2) / max(min(f1, f2), 1)
+
+            if ratio < 5:  # Very similar accounts
+                weight = 0.5 / ratio
+                edges.append(GraphEdge(
+                    src_id=id1,
+                    dst_id=id2,
+                    edge_type="cohort",
+                    weight=weight
+                ))
+                connections += 1
+
+    return edges
 
 
 # =============================================================================
@@ -564,11 +689,12 @@ class FrameBuilder:
         # Normalize
         max_edge_weight = max(edge_weights.values()) if edge_weights else 1.0
         max_followers = max((n.followers_count for n in nodes.values()), default=1)
-        
+        max_followers_log = math.log1p(max_followers) if max_followers > 0 else 1.0
+
         importance = {}
         for account_id, node in nodes.items():
             edge_score = edge_weights.get(account_id, 0) / max_edge_weight
-            follower_score = math.log1p(node.followers_count) / math.log1p(max_followers)
+            follower_score = math.log1p(node.followers_count) / max_followers_log
             importance[account_id] = 0.7 * edge_score + 0.3 * follower_score
         
         return importance
@@ -579,20 +705,29 @@ class FrameBuilder:
         edges: List[GraphEdge],
         max_nodes: int = MAX_NODES_RENDERED,
         max_edges: int = MAX_EDGES_RENDERED,
-        max_edges_per_node: int = MAX_EDGES_PER_NODE
+        max_edges_per_node: int = MAX_EDGES_PER_NODE,
+        min_followers: int = MIN_FOLLOWERS_FOR_DISPLAY
     ) -> Tuple[Dict[str, GraphNode], List[GraphEdge]]:
         """
         Prune graph to fit performance bounds.
-        Keep top nodes by importance, top edges by weight.
+        First filter by minimum follower count, then keep top nodes by importance.
         """
+        # Filter out very small accounts first (reduces initial lag)
+        if min_followers > 0:
+            nodes = {
+                aid: node for aid, node in nodes.items()
+                if node.followers_count >= min_followers
+            }
+            logger.info(f"After min_followers filter ({min_followers}): {len(nodes)} nodes")
+
         # Compute importance
         importance = self.compute_importance(nodes, edges)
-        
+
         # Update nodes with importance
         for account_id, imp in importance.items():
             if account_id in nodes:
                 nodes[account_id].importance = imp
-        
+
         # Prune nodes
         if len(nodes) > max_nodes:
             sorted_nodes = sorted(nodes.items(), key=lambda x: -x[1].importance)
@@ -635,93 +770,137 @@ class FrameBuilder:
     ) -> dict:
         """
         Build a complete frame for visualization.
-        
-        Returns dict with nodes, edges, communities, positions, metadata.
-        Handles edge cases like empty graphs gracefully.
+
+        The graph grows over time:
+        - Each frame shows ALL followers accumulated up to that interval
+        - New followers connect to existing ones, growing the network outward
+        - Edges persist and accumulate across intervals
         """
+        from .models import Snapshot, SnapshotFollower
+
         if not interval:
             logger.warning("build_frame called with None interval")
             return self._empty_frame(timeframe_days)
-        
+
         reference_time = interval.end_at
         if not reference_time:
             logger.warning(f"Interval {interval.interval_id} has no end_at")
             reference_time = utc_now()
-        
-        try:
-            # Build edges with error handling
-            interaction_edges = build_edges_from_interactions(
-                self.db, interval, timeframe_days, reference_time
-            )
-        except Exception as e:
-            logger.error(f"Failed to build interaction edges: {e}")
-            interaction_edges = []
-        
-        try:
-            coengagement_edges = build_edges_from_coengagement(
-                self.db, interval, timeframe_days, reference_time
-            )
-        except Exception as e:
-            logger.error(f"Failed to build co-engagement edges: {e}")
-            coengagement_edges = []
-        
-        try:
-            ego_edges = build_ego_follow_edges(self.db, interval, ego_id)
-        except Exception as e:
-            logger.error(f"Failed to build ego edges: {e}")
-            ego_edges = []
-        
-        all_edges = interaction_edges + coengagement_edges + ego_edges
-        
-        # Collect all account IDs
-        account_ids: Set[str] = set()
-        for edge in all_edges:
-            account_ids.add(edge.src_id)
-            account_ids.add(edge.dst_id)
-        
-        # Also include new followers even if no edges
+
+        # Get ALL followers up to and including this interval's end snapshot
+        # This makes the graph cumulative/growing
+        all_snapshots = self.db.query(Snapshot).filter(
+            Snapshot.kind == "followers",
+            Snapshot.captured_at <= reference_time
+        ).order_by(Snapshot.captured_at.asc()).all()
+
+        # Build cumulative set of all follower IDs
+        cumulative_follower_ids: Set[str] = set()
+        for snap in all_snapshots:
+            for sf in snap.followers:
+                cumulative_follower_ids.add(sf.account_id)
+
+        # Get new followers in THIS interval (for highlighting)
+        new_follower_ids: Set[str] = set()
         try:
             new_followers = self.db.query(FollowEvent).filter(
                 FollowEvent.interval_id == interval.interval_id,
                 FollowEvent.kind == "new"
             ).all()
-            for fe in new_followers:
-                account_ids.add(fe.account_id)
+            new_follower_ids = {fe.account_id for fe in new_followers}
         except Exception as e:
             logger.error(f"Failed to query follow events: {e}")
-            new_followers = []
-        
+
+        # Existing followers (were here before this interval)
+        existing_follower_ids = cumulative_follower_ids - new_follower_ids
+
+        # Build edges - accumulate from all intervals up to this one
+        all_edges: List[GraphEdge] = []
+
+        # Get all intervals up to this one
+        all_intervals = self.db.query(Interval).filter(
+            Interval.end_at <= reference_time
+        ).order_by(Interval.end_at.asc()).all()
+
+        # Track which nodes have been added (for growth edges)
+        nodes_added_so_far: Set[str] = set()
+
+        for iv in all_intervals:
+            # Get new followers for this interval
+            iv_new = self.db.query(FollowEvent).filter(
+                FollowEvent.interval_id == iv.interval_id,
+                FollowEvent.kind == "new"
+            ).all()
+            iv_new_ids = {fe.account_id for fe in iv_new}
+
+            # Build growth edges: connect new nodes to existing network
+            try:
+                growth_edges = build_edges_from_follow_events(
+                    self.db, iv, existing_node_ids=nodes_added_so_far
+                )
+                all_edges.extend(growth_edges)
+            except Exception as e:
+                logger.error(f"Failed to build growth edges for interval {iv.interval_id}: {e}")
+
+            # Add these new nodes to the "existing" set for next iteration
+            nodes_added_so_far.update(iv_new_ids)
+
+        # Also try interaction/coengagement edges (likely empty but include for completeness)
+        try:
+            interaction_edges = build_edges_from_interactions(
+                self.db, interval, timeframe_days, reference_time
+            )
+            all_edges.extend(interaction_edges)
+        except Exception as e:
+            logger.error(f"Failed to build interaction edges: {e}")
+
+        try:
+            coengagement_edges = build_edges_from_coengagement(
+                self.db, interval, timeframe_days, reference_time
+            )
+            all_edges.extend(coengagement_edges)
+        except Exception as e:
+            logger.error(f"Failed to build co-engagement edges: {e}")
+
+        # Collect all account IDs from edges + all cumulative followers
+        account_ids = cumulative_follower_ids.copy()
+        for edge in all_edges:
+            account_ids.add(edge.src_id)
+            account_ids.add(edge.dst_id)
+
         # Handle empty graph case
         if not account_ids:
             logger.info(f"No accounts found for interval {interval.interval_id}")
             return self._empty_frame(timeframe_days, interval)
-        
-        # Get account data
-        nodes = self.get_accounts_for_frame(interval, account_ids)
-        
+
+        # Get account data (mark new followers)
+        nodes = self.get_accounts_for_frame_cumulative(
+            interval, account_ids, new_follower_ids
+        )
+
         # Prune to bounds
         nodes, all_edges = self.prune_graph(nodes, all_edges)
-        
+
         # Community detection
         communities = simple_community_detection(list(nodes.values()), all_edges)
-        
+
         # Update nodes with community
         for account_id, community_id in communities.items():
             if account_id in nodes:
                 nodes[account_id].community_id = community_id
-        
+
         # Compute positions
         positions = compute_positions(
             self.db, interval, list(nodes.values()), all_edges, communities
         )
-        
+
         # Update nodes with positions
         for account_id, (x, y, z) in positions.items():
             if account_id in nodes:
                 nodes[account_id].x = x
                 nodes[account_id].y = y
                 nodes[account_id].z = z
-        
+
         # Build frame JSON
         frame_data = {
             "interval_id": interval.interval_id,
@@ -760,8 +939,32 @@ class FrameBuilder:
                 "newFollowers": len([n for n in nodes.values() if n.is_new])
             }
         }
-        
+
         return frame_data
+
+    def get_accounts_for_frame_cumulative(
+        self,
+        interval: Interval,
+        account_ids: Set[str],
+        new_follower_ids: Set[str]
+    ) -> Dict[str, GraphNode]:
+        """Load account data for nodes, marking which are new in this interval."""
+        accounts = self.db.query(Account).filter(
+            Account.account_id.in_(account_ids)
+        ).all()
+
+        nodes = {}
+        for acc in accounts:
+            nodes[acc.account_id] = GraphNode(
+                account_id=acc.account_id,
+                handle=acc.handle,
+                name=acc.name,
+                avatar_url=acc.avatar_url,
+                followers_count=acc.followers_count or 0,
+                is_new=acc.account_id in new_follower_ids
+            )
+
+        return nodes
     
     def save_frame(
         self,
@@ -770,6 +973,13 @@ class FrameBuilder:
         timeframe_window: int = 30
     ) -> Frame:
         """Save computed frame to database."""
+        # Delete existing data for this interval to allow rebuilds
+        self.db.query(Edge).filter(Edge.interval_id == interval.interval_id).delete()
+        self.db.query(Community).filter(Community.interval_id == interval.interval_id).delete()
+        self.db.query(Position).filter(Position.interval_id == interval.interval_id).delete()
+        self.db.query(Frame).filter(Frame.interval_id == interval.interval_id).delete()
+        self.db.commit()
+
         # Store edges
         for edge_data in frame_data["edges"]:
             edge = Edge(
