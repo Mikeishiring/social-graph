@@ -123,3 +123,63 @@ export function playSuccessSound() {
     // Silent fail if audio not supported
   }
 }
+
+// Bubble pop sound - soft bubbly pop for node entrance
+export function playBubblePopSound(pitch: number = 1) {
+  try {
+    const ctx = getAudioContext();
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    oscillator.connect(gain);
+    gain.connect(ctx.destination);
+
+    // Higher pitch = smaller bubble feel
+    const baseFreq = 600 * pitch;
+    oscillator.frequency.setValueAtTime(baseFreq, ctx.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(baseFreq * 0.5, ctx.currentTime + 0.08);
+    oscillator.type = 'sine';
+
+    // Quick attack, quick decay
+    gain.gain.setValueAtTime(0, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.04, ctx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
+
+    oscillator.start(ctx.currentTime);
+    oscillator.stop(ctx.currentTime + 0.1);
+  } catch {
+    // Silent fail if audio not supported
+  }
+}
+
+// Ripple sound - spreading wave sound for ripple effect
+export function playRippleSound() {
+  try {
+    const ctx = getAudioContext();
+
+    // Create a spreading "bloop" sound
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
+
+    oscillator.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+
+    oscillator.frequency.setValueAtTime(300, ctx.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(100, ctx.currentTime + 0.3);
+    oscillator.type = 'sine';
+
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(800, ctx.currentTime);
+    filter.frequency.exponentialRampToValueAtTime(200, ctx.currentTime + 0.3);
+
+    gain.gain.setValueAtTime(0.06, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+
+    oscillator.start(ctx.currentTime);
+    oscillator.stop(ctx.currentTime + 0.4);
+  } catch {
+    // Silent fail if audio not supported
+  }
+}

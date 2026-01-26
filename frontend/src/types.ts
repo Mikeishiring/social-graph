@@ -14,12 +14,16 @@ export interface GraphNode {
   y: number;
   z: number;
   isNew: boolean;
+  isEgo?: boolean;  // The central user (you)
 }
 
 export interface GraphEdge {
   source: string;
   target: string;
-  type: 'direct_interaction' | 'co_engagement' | 'ego_follow';
+  type:
+    | 'direct_interaction' | 'co_engagement' | 'ego_follow' | 'ego_connection'
+    | 'network_growth' | 'cohort' | 'followers_you' | 'you_follow' | 'mutual' | 'network'
+    | 'tier_1_ego' | 'tier_2_hub' | 'tier_3_bridge' | 'tier_4_cluster' | 'tier_5_outer' | 'tier_6_leaf' | 'fallback_ego';
   weight: number;
 }
 
@@ -34,6 +38,7 @@ export interface GraphData {
   interval_id: number;
   timeframe_days: number;
   timestamp: string;
+  ego_id?: string;  // The central user's ID
   nodes: GraphNode[];
   edges: GraphEdge[];
   communities: number[];

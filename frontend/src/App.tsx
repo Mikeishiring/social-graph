@@ -10,6 +10,9 @@ import TimelineSlider from './components/TimelineSlider';
 import PostPanel from './components/PostPanel';
 import GraphLegend from './components/GraphLegend';
 import CameraFocus from './components/CameraFocus';
+import { OrbitMode } from './components/effects/OrbitMode';
+import { ConstellationTrails } from './components/effects/ConstellationTrails';
+import EffectsPanel from './components/EffectsPanel';
 import { fetchFrame, fetchFrames, fetchGraphData, fetchPosts, fetchStats } from './api';
 import type { GraphData, GraphNode, ApiStats, FrameSummary, PostMarker, GraphEdge } from './types';
 
@@ -33,10 +36,29 @@ export default function App() {
     direct_interaction: true,
     co_engagement: true,
     ego_follow: true,
+    ego_connection: true,
+    network_growth: true,
+    cohort: true,
+    followers_you: true,
+    you_follow: true,
+    mutual: true,
+    network: true,
+    tier_1_ego: true,
+    tier_2_hub: true,
+    tier_3_bridge: true,
+    tier_4_cluster: true,
+    tier_5_outer: true,
+    tier_6_leaf: true,
+    fallback_ego: true,
   });
   const [activeCommunities, setActiveCommunities] = useState<Set<number>>(new Set());
   const [communityFilterTouched, setCommunityFilterTouched] = useState(false);
   const [focusMode, setFocusMode] = useState(true);
+  const [orbitMode, setOrbitMode] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [trailsEnabled, setTrailsEnabled] = useState(true);
+  const [heartbeatEnabled, setHeartbeatEnabled] = useState(true);
+  const [personalityEnabled, setPersonalityEnabled] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
@@ -372,6 +394,8 @@ export default function App() {
               selectedNode={selectedNode}
               highlightedNodeIds={highlightedNodeIds}
               focusMode={focusMode}
+              heartbeatEnabled={heartbeatEnabled}
+              personalityEnabled={personalityEnabled}
             />
           )}
 
@@ -380,15 +404,33 @@ export default function App() {
           {/* Orbit controls with slow auto-rotation */}
           <OrbitControls
             ref={controlsRef}
-            enablePan={true}
-            enableZoom={true}
-            enableRotate={true}
+            enablePan={!orbitMode}
+            enableZoom={!orbitMode}
+            enableRotate={!orbitMode}
             minDistance={20}
             maxDistance={300}
             dampingFactor={0.05}
             rotateSpeed={0.5}
-            autoRotate={!selectedNode && !selectedPost && !isPlaying}
+            autoRotate={!selectedNode && !selectedPost && !isPlaying && !orbitMode}
             autoRotateSpeed={0.3}
+            onStart={() => setIsDragging(true)}
+            onEnd={() => setIsDragging(false)}
+          />
+
+          {/* Cinematic orbit screensaver mode */}
+          <OrbitMode
+            enabled={orbitMode}
+            controlsRef={controlsRef}
+            speed={0.12}
+            radius={130}
+            verticalAmplitude={25}
+          />
+
+          {/* Constellation trails during drag */}
+          <ConstellationTrails
+            enabled={trailsEnabled && !orbitMode}
+            isDragging={isDragging}
+            maxPoints={80}
           />
         </Suspense>
       </Canvas>
@@ -497,6 +539,18 @@ export default function App() {
                 {days}d
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => setOrbitMode((prev) => !prev)}
+              className={`px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all border ${
+                orbitMode
+                  ? 'bg-purple-500 border-purple-400 text-white shadow-md'
+                  : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+              }`}
+              title="Toggle cinematic orbit mode"
+            >
+              Orbit
+            </button>
             <button
               type="button"
               onClick={handleExport}
@@ -630,6 +684,18 @@ export default function App() {
             setActiveCommunities(new Set(allCommunities));
           }}
           onToggleFocusMode={() => setFocusMode((prev) => !prev)}
+        />
+
+        {/* Effects toggle panel */}
+        <EffectsPanel
+          orbitMode={orbitMode}
+          trailsEnabled={trailsEnabled}
+          heartbeatEnabled={heartbeatEnabled}
+          personalityEnabled={personalityEnabled}
+          onToggleOrbit={() => setOrbitMode(prev => !prev)}
+          onToggleTrails={() => setTrailsEnabled(prev => !prev)}
+          onToggleHeartbeat={() => setHeartbeatEnabled(prev => !prev)}
+          onTogglePersonality={() => setPersonalityEnabled(prev => !prev)}
         />
       </div>
 

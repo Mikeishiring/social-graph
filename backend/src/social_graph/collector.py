@@ -127,55 +127,78 @@ class Collector:
         return raw
     
     def _upsert_account(self, user_data: dict) -> Account:
-        """Insert or update account from Twitter user data."""
+        """Insert or update account from Twitter user data with all available fields."""
         account_id = str(user_data.get("id"))
-        
+
         account = self.db.query(Account).filter(
             Account.account_id == account_id
         ).first()
-        
+
         public_metrics = user_data.get("public_metrics", {})
         created_at = None
         if user_data.get("created_at"):
             try:
-                created_at = datetime.fromisoformat(
-                    user_data["created_at"].replace("Z", "+00:00")
-                )
-            except:
+                # Handle various date formats from the API
+                date_str = user_data["created_at"]
+                if "+" in date_str or date_str.endswith("Z"):
+                    created_at = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                else:
+                    # Format like "Thu Dec 13 08:41:26 +0000 2007"
+                    from datetime import timezone
+                    created_at = datetime.strptime(date_str, "%a %b %d %H:%M:%S %z %Y")
+            except Exception:
                 pass
-        
+
         if account:
-            # Update existing
+            # Update existing with all fields
             account.handle = user_data.get("username")
             account.name = user_data.get("name")
             account.avatar_url = user_data.get("profile_image_url")
+            account.cover_url = user_data.get("cover_image_url")
             account.bio = user_data.get("description")
+            account.location = user_data.get("location")
             account.followers_count = public_metrics.get("followers_count")
             account.following_count = public_metrics.get("following_count")
             account.tweet_count = public_metrics.get("tweet_count")
+            account.media_count = public_metrics.get("media_count")
+            account.favourites_count = public_metrics.get("favourites_count")
+            account.is_automated = user_data.get("is_automated")
+            account.possibly_sensitive = user_data.get("possibly_sensitive")
+            account.can_dm = user_data.get("can_dm")
             account.last_seen_at = utc_now()
             if created_at:
                 account.created_at = created_at
         else:
-            # Create new
+            # Create new with all fields
             account = Account(
                 account_id=account_id,
                 handle=user_data.get("username"),
                 name=user_data.get("name"),
                 avatar_url=user_data.get("profile_image_url"),
+                cover_url=user_data.get("cover_image_url"),
                 bio=user_data.get("description"),
+                location=user_data.get("location"),
                 followers_count=public_metrics.get("followers_count"),
                 following_count=public_metrics.get("following_count"),
                 tweet_count=public_metrics.get("tweet_count"),
+                media_count=public_metrics.get("media_count"),
+                favourites_count=public_metrics.get("favourites_count"),
+                is_automated=user_data.get("is_automated"),
+                possibly_sensitive=user_data.get("possibly_sensitive"),
+                can_dm=user_data.get("can_dm"),
                 created_at=created_at
             )
             self.db.add(account)
-        
+
         return account
     
     @api_retry
     async def collect_followers(self, user_id: str, max_pages: int = None, username: str = None) -> Snapshot:
-        """Collect all followers and create snapshot."""
+        """Collect all followers and create snapshot with position tracking.
+
+        Position 0 = newest follower (API returns newest-first).
+        This enables accurate post attribution by correlating follow time with post time.
+        """
         snapshot = Snapshot(
             run_id=self.run.run_id,
             kind="followers",
@@ -186,6 +209,7 @@ class Collector:
         self.db.refresh(snapshot)
 
         all_account_ids = []
+        global_position = 0  # Track position across all pages
 
         async for users, cursor_in, cursor_out, truncated in self.twitter.paginate_followers(
             user_id, max_pages=max_pages, username=username
@@ -199,21 +223,23 @@ class Collector:
                 truncated=truncated,
                 payload={"data": users}
             )
-            
-            # Upsert accounts and create snapshot membership
+
+            # Upsert accounts and create snapshot membership with position
             for user_data in users:
                 account = self._upsert_account(user_data)
                 all_account_ids.append(account.account_id)
-                
+
                 follower_entry = SnapshotFollower(
                     snapshot_id=snapshot.snapshot_id,
-                    account_id=account.account_id
+                    account_id=account.account_id,
+                    follow_position=global_position  # 0 = newest, higher = older
                 )
                 self.db.add(follower_entry)
-        
+                global_position += 1
+
         snapshot.account_count = len(all_account_ids)
         self.db.commit()
-        
+
         return snapshot
     
     @api_retry
@@ -401,3 +427,90 @@ class Collector:
         except Exception as e:
             self._finish_run("failed", str(e))
             raise
+
+    async def collect_network_connections(
+        self,
+        account_ids: list[str],
+        max_per_account: int = 100,
+        progress_callback=None
+    ) -> dict:
+        """
+        Collect following lists for multiple accounts to build network topology.
+
+        This creates edges between accounts in your network, enabling path finding
+        like: You → Person A → Person B → Person C
+
+        Args:
+            account_ids: List of account IDs to collect following for
+            max_per_account: Max following to collect per account (API limit aware)
+            progress_callback: Optional callback(current, total, account_handle)
+        """
+        from .models import NetworkConnection, Account
+
+        total = len(account_ids)
+        collected = 0
+        connections_added = 0
+        errors = []
+
+        for i, account_id in enumerate(account_ids):
+            try:
+                # Get account info for username
+                account = self.db.query(Account).filter(
+                    Account.account_id == account_id
+                ).first()
+
+                if not account or not account.handle:
+                    continue
+
+                if progress_callback:
+                    progress_callback(i + 1, total, account.handle)
+
+                # Collect who this account follows
+                following_ids = []
+                page_count = 0
+                max_pages = max(1, max_per_account // 100)  # ~100 per page
+
+                async for users, cursor_in, cursor_out, truncated in self.twitter.paginate_following(
+                    account.handle,
+                    max_results=100
+                ):
+                    for user in users:
+                        following_ids.append(user.get("id"))
+                        # Also upsert the account
+                        self._upsert_account(user)
+
+                    page_count += 1
+                    if page_count >= max_pages:
+                        break
+                    if not cursor_out:
+                        break
+
+                # Store connections
+                for following_id in following_ids:
+                    # Check if connection already exists
+                    existing = self.db.query(NetworkConnection).filter(
+                        NetworkConnection.follower_id == account_id,
+                        NetworkConnection.following_id == following_id
+                    ).first()
+
+                    if not existing:
+                        conn = NetworkConnection(
+                            follower_id=account_id,
+                            following_id=following_id
+                        )
+                        self.db.add(conn)
+                        connections_added += 1
+
+                self.db.commit()
+                collected += 1
+
+            except Exception as e:
+                errors.append({"account_id": account_id, "error": str(e)})
+                logger.error(f"Failed to collect following for {account_id}: {e}")
+                continue
+
+        return {
+            "accounts_processed": collected,
+            "connections_added": connections_added,
+            "errors": errors
+        }

@@ -688,3 +688,107 @@ async def get_account_stats(db: Session = Depends(get_db)):
         "with_handle": with_handle,
         "completeness_pct": round(with_avatar / total * 100, 1) if total > 0 else 0
     }
+
+
+# =============================================================================
+# Network Topology Collection (Second-Degree Connections)
+# =============================================================================
+
+@app.post("/network/collect")
+async def collect_network_connections(
+    limit: int = 50,
+    max_per_account: int = 100,
+    db: Session = Depends(get_db)
+):
+    """
+    Collect following lists for accounts in your network.
+
+    This builds the network topology by discovering who your followers/following
+    follow each other. Enables routing like: You → Person A → Person B
+
+    Args:
+        limit: Max number of accounts to process
+        max_per_account: Max following to collect per account
+
+    Note: This is API-intensive. Start with small limits.
+    """
+    from .models import NetworkConnection
+
+    # Get accounts that are in your network (followers + following)
+    # Prioritize accounts with higher follower counts (more likely to be connected)
+    accounts = db.query(Account).filter(
+        Account.handle != None,
+        Account.followers_count >= 100  # Only accounts with decent reach
+    ).order_by(Account.followers_count.desc()).limit(limit).all()
+
+    account_ids = [a.account_id for a in accounts]
+
+    # Check how many we've already processed
+    already_processed = db.query(NetworkConnection.follower_id).distinct().filter(
+        NetworkConnection.follower_id.in_(account_ids)
+    ).count()
+
+    # Filter to only unprocessed accounts
+    processed_ids = set(
+        row[0] for row in db.query(NetworkConnection.follower_id).distinct().filter(
+            NetworkConnection.follower_id.in_(account_ids)
+        ).all()
+    )
+    unprocessed_ids = [aid for aid in account_ids if aid not in processed_ids]
+
+    if not unprocessed_ids:
+        return {
+            "status": "complete",
+            "message": f"All {limit} accounts already processed",
+            "accounts_in_network": len(account_ids),
+            "already_processed": already_processed
+        }
+
+    async with Collector(db) as collector:
+        result = await collector.collect_network_connections(
+            unprocessed_ids[:limit],
+            max_per_account=max_per_account
+        )
+
+    return {
+        "status": "success",
+        **result,
+        "total_in_network": len(account_ids),
+        "remaining": len(unprocessed_ids) - result["accounts_processed"]
+    }
+
+
+@app.get("/network/stats")
+async def get_network_stats(db: Session = Depends(get_db)):
+    """Get statistics about network topology data."""
+    from .models import NetworkConnection
+
+    total_connections = db.query(NetworkConnection).count()
+    unique_followers = db.query(NetworkConnection.follower_id).distinct().count()
+    unique_following = db.query(NetworkConnection.following_id).distinct().count()
+
+    # Find accounts with most connections in the network
+    from sqlalchemy import func
+    top_connected = db.query(
+        NetworkConnection.following_id,
+        func.count(NetworkConnection.follower_id).label('incoming')
+    ).group_by(NetworkConnection.following_id).order_by(
+        func.count(NetworkConnection.follower_id).desc()
+    ).limit(10).all()
+
+    top_connected_with_names = []
+    for account_id, count in top_connected:
+        account = db.query(Account).filter(Account.account_id == account_id).first()
+        if account:
+            top_connected_with_names.append({
+                "handle": account.handle,
+                "name": account.name,
+                "incoming_connections": count
+            })
+
+    return {
+        "total_connections": total_connections,
+        "accounts_with_data": unique_followers,
+        "accounts_in_graph": unique_following,
+        "top_connected": top_connected_with_names
+    }

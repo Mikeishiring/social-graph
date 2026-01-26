@@ -51,7 +51,51 @@ CO_ENGAGEMENT_WINDOW_HOURS = 72
 MAX_NODES_RENDERED = 2000
 MAX_EDGES_RENDERED = 12000
 MAX_EDGES_PER_NODE = 50
-MIN_FOLLOWERS_FOR_DISPLAY = 100  # Filter out very small accounts to reduce lag
+MIN_FOLLOWERS_FOR_DISPLAY = 500  # Filter out small accounts - only show meaningful connections
+
+# 6-Tier Hierarchy Thresholds (for network routing)
+TIER_THRESHOLDS = {
+    1: 100_000,  # 100k+ -> connect to ego
+    2: 50_000,   # 50k-100k -> connect to tier 1
+    3: 10_000,   # 10k-50k -> connect to tier 2
+    4: 5_000,    # 5k-10k -> connect to tier 3
+    5: 2_000,    # 2k-5k -> connect to tier 4
+    6: 0,        # <2k -> connect to tier 5
+}
+
+TIER_EDGE_TYPES = {
+    1: "tier_1_ego",
+    2: "tier_2_hub",
+    3: "tier_3_bridge",
+    4: "tier_4_cluster",
+    5: "tier_5_outer",
+    6: "tier_6_leaf",
+}
+
+TIER_WEIGHTS = {
+    1: 0.9,
+    2: 0.7,
+    3: 0.5,
+    4: 0.4,
+    5: 0.3,
+    6: 0.2,
+}
+
+
+def classify_follower_tier(followers_count: int) -> int:
+    """Classify account into tier 1-6 based on follower count."""
+    if followers_count >= 100_000:
+        return 1
+    elif followers_count >= 50_000:
+        return 2
+    elif followers_count >= 10_000:
+        return 3
+    elif followers_count >= 5_000:
+        return 4
+    elif followers_count >= 2_000:
+        return 5
+    else:
+        return 6
 
 
 @dataclass
@@ -68,6 +112,7 @@ class GraphNode:
     y: float = 0.0
     z: float = 0.0
     is_new: bool = False  # New in this interval
+    is_ego: bool = False  # The central user (you)
 
 
 @dataclass
@@ -425,11 +470,13 @@ def compute_positions(
     interval: Interval,
     nodes: List[GraphNode],
     edges: List[GraphEdge],
-    communities: Dict[str, int]
+    communities: Dict[str, int],
+    ego_id: str = None
 ) -> Dict[str, Tuple[float, float, float]]:
     """
     Compute node positions using force-directed layout with stability.
-    
+
+    - Ego user pinned at center (0, 0, 0)
     - Use previous positions as seeds when available
     - New nodes seeded near their strongest neighbor
     - Bounded iterations for stability
@@ -492,9 +539,13 @@ def compute_positions(
                     random.uniform(-10, 10)
                 )
     
+    # Pin ego at center before layout
+    if ego_id:
+        positions[ego_id] = (0.0, 0.0, 0.0)
+
     # Simple force-directed relaxation (bounded iterations)
-    positions = force_directed_layout(nodes, edges, positions, max_iterations=50)
-    
+    positions = force_directed_layout(nodes, edges, positions, max_iterations=50, ego_id=ego_id)
+
     return positions
 
 
@@ -503,22 +554,28 @@ def force_directed_layout(
     edges: List[GraphEdge],
     initial_positions: Dict[str, Tuple[float, float, float]],
     max_iterations: int = 50,
-    cooling_factor: float = 0.95
+    cooling_factor: float = 0.95,
+    ego_id: str = None
 ) -> Dict[str, Tuple[float, float, float]]:
     """
-    Simple 3D force-directed layout.
-    
+    Simple 3D force-directed layout with ego node pinned at center.
+
+    - Ego user stays at origin (0, 0, 0)
     - Repulsion between all nodes
     - Attraction along edges
     - Bounded iterations for stability
     """
     positions = dict(initial_positions)
-    
+
+    # Pin ego at center if specified
+    if ego_id:
+        positions[ego_id] = (0.0, 0.0, 0.0)
+
     # Parameters
     k_repulsion = 1000.0  # Repulsion constant
     k_attraction = 0.01   # Attraction constant
     temperature = 10.0    # Initial movement limit
-    
+
     node_ids = [n.account_id for n in nodes]
     
     # Build edge lookup
@@ -586,23 +643,32 @@ def force_directed_layout(
         for nid in node_ids:
             if nid not in positions:
                 continue
-            
+
+            # Keep ego pinned at center
+            if nid == ego_id:
+                positions[nid] = (0.0, 0.0, 0.0)
+                continue
+
             fx, fy, fz = forces[nid]
             force_mag = math.sqrt(fx * fx + fy * fy + fz * fz) + 0.01
-            
+
             # Limit movement by temperature
             movement = min(force_mag, temperature)
-            
+
             x, y, z = positions[nid]
             positions[nid] = (
                 x + (fx / force_mag) * movement,
                 y + (fy / force_mag) * movement,
                 z + (fz / force_mag) * movement
             )
-        
+
         # Cool down
         temperature *= cooling_factor
-    
+
+    # Ensure ego stays at center
+    if ego_id:
+        positions[ego_id] = (0.0, 0.0, 0.0)
+
     return positions
 
 
@@ -771,12 +837,14 @@ class FrameBuilder:
         """
         Build a complete frame for visualization.
 
-        The graph grows over time:
-        - Each frame shows ALL followers accumulated up to that interval
-        - New followers connect to existing ones, growing the network outward
-        - Edges persist and accumulate across intervals
+        Edge types:
+        - followers_you: They follow you (green) - edge FROM them TO you
+        - you_follow: You follow them (blue) - edge FROM you TO them
+        - mutual: Both directions (purple)
+
+        The goal: See who you followed first that led to others following them.
         """
-        from .models import Snapshot, SnapshotFollower
+        from .models import Snapshot, SnapshotFollower, SnapshotFollowing
 
         if not interval:
             logger.warning("build_frame called with None interval")
@@ -787,18 +855,34 @@ class FrameBuilder:
             logger.warning(f"Interval {interval.interval_id} has no end_at")
             reference_time = utc_now()
 
-        # Get ALL followers up to and including this interval's end snapshot
-        # This makes the graph cumulative/growing
-        all_snapshots = self.db.query(Snapshot).filter(
+        # Get followers (people who follow YOU) up to this time
+        follower_snapshots = self.db.query(Snapshot).filter(
             Snapshot.kind == "followers",
             Snapshot.captured_at <= reference_time
         ).order_by(Snapshot.captured_at.asc()).all()
 
-        # Build cumulative set of all follower IDs
-        cumulative_follower_ids: Set[str] = set()
-        for snap in all_snapshots:
+        follower_ids: Set[str] = set()
+        for snap in follower_snapshots:
             for sf in snap.followers:
-                cumulative_follower_ids.add(sf.account_id)
+                follower_ids.add(sf.account_id)
+
+        # Get following (people YOU follow) up to this time
+        following_snapshots = self.db.query(Snapshot).filter(
+            Snapshot.kind == "following",
+            Snapshot.captured_at <= reference_time
+        ).order_by(Snapshot.captured_at.asc()).all()
+
+        following_ids: Set[str] = set()
+        for snap in following_snapshots:
+            for sf in snap.following:
+                following_ids.add(sf.account_id)
+
+        # Calculate relationship types
+        mutual_ids = follower_ids & following_ids
+        only_followers = follower_ids - following_ids  # They follow you, you don't follow back
+        only_following = following_ids - follower_ids  # You follow them, they don't follow back
+
+        logger.info(f"Frame {interval.interval_id}: {len(follower_ids)} followers, {len(following_ids)} following, {len(mutual_ids)} mutual")
 
         # Get new followers in THIS interval (for highlighting)
         new_follower_ids: Set[str] = set()
@@ -811,87 +895,123 @@ class FrameBuilder:
         except Exception as e:
             logger.error(f"Failed to query follow events: {e}")
 
-        # Existing followers (were here before this interval)
-        existing_follower_ids = cumulative_follower_ids - new_follower_ids
-
-        # Build edges - accumulate from all intervals up to this one
+        # Build directional edges from ego
         all_edges: List[GraphEdge] = []
 
-        # Get all intervals up to this one
-        all_intervals = self.db.query(Interval).filter(
-            Interval.end_at <= reference_time
-        ).order_by(Interval.end_at.asc()).all()
-
-        # Track which nodes have been added (for growth edges)
-        nodes_added_so_far: Set[str] = set()
-
-        for iv in all_intervals:
-            # Get new followers for this interval
-            iv_new = self.db.query(FollowEvent).filter(
-                FollowEvent.interval_id == iv.interval_id,
-                FollowEvent.kind == "new"
-            ).all()
-            iv_new_ids = {fe.account_id for fe in iv_new}
-
-            # Build growth edges: connect new nodes to existing network
-            try:
-                growth_edges = build_edges_from_follow_events(
-                    self.db, iv, existing_node_ids=nodes_added_so_far
-                )
-                all_edges.extend(growth_edges)
-            except Exception as e:
-                logger.error(f"Failed to build growth edges for interval {iv.interval_id}: {e}")
-
-            # Add these new nodes to the "existing" set for next iteration
-            nodes_added_so_far.update(iv_new_ids)
-
-        # Also try interaction/coengagement edges (likely empty but include for completeness)
-        try:
-            interaction_edges = build_edges_from_interactions(
-                self.db, interval, timeframe_days, reference_time
-            )
-            all_edges.extend(interaction_edges)
-        except Exception as e:
-            logger.error(f"Failed to build interaction edges: {e}")
-
-        try:
-            coengagement_edges = build_edges_from_coengagement(
-                self.db, interval, timeframe_days, reference_time
-            )
-            all_edges.extend(coengagement_edges)
-        except Exception as e:
-            logger.error(f"Failed to build co-engagement edges: {e}")
-
-        # Collect all account IDs from edges + all cumulative followers
-        account_ids = cumulative_follower_ids.copy()
-        for edge in all_edges:
-            account_ids.add(edge.src_id)
-            account_ids.add(edge.dst_id)
+        # All relevant account IDs
+        all_account_ids = follower_ids | following_ids
+        if ego_id:
+            all_account_ids.add(ego_id)
 
         # Handle empty graph case
-        if not account_ids:
+        if not all_account_ids:
             logger.info(f"No accounts found for interval {interval.interval_id}")
             return self._empty_frame(timeframe_days, interval)
 
-        # Get account data (mark new followers)
+        # Get account data
         nodes = self.get_accounts_for_frame_cumulative(
-            interval, account_ids, new_follower_ids
+            interval, all_account_ids, new_follower_ids, ego_id
         )
 
-        # Prune to bounds
+        # Prune nodes first (before adding ego edges)
         nodes, all_edges = self.prune_graph(nodes, all_edges)
+
+        # After pruning, recalculate which IDs remain
+        remaining_ids = set(nodes.keys())
+        remaining_followers = follower_ids & remaining_ids
+        remaining_following = following_ids & remaining_ids
+        remaining_mutual = mutual_ids & remaining_ids
+
+        # Add network edges (connections BETWEEN accounts in your network)
+        # This creates the routing/topology instead of starburst
+        from .models import NetworkConnection
+        network_edges = self._build_network_edges(
+            remaining_ids,
+            ego_id,
+            mutual_ids=remaining_mutual,
+            follower_ids=remaining_followers,
+            following_ids=remaining_following
+        )
+        all_edges.extend(network_edges)
+        logger.info(f"Added {len(network_edges)} network edges between accounts")
+
+        # Create directional edges from ego AFTER pruning
+        # Only add ego edges for accounts NOT connected via network
+        ego_edges = []
+        if ego_id:
+            # Ensure ego is in nodes
+            if ego_id not in nodes:
+                ego_account = self.db.query(Account).filter(Account.account_id == ego_id).first()
+                if ego_account:
+                    nodes[ego_id] = GraphNode(
+                        account_id=ego_id,
+                        handle=ego_account.handle,
+                        name=ego_account.name,
+                        avatar_url=ego_account.avatar_url,
+                        followers_count=ego_account.followers_count or 0,
+                        is_ego=True,
+                        importance=1.0
+                    )
+
+            # Find accounts that have network connections
+            accounts_with_network_edges = set()
+            for edge in network_edges:
+                accounts_with_network_edges.add(edge.src_id)
+                accounts_with_network_edges.add(edge.dst_id)
+
+            # First: ALL mutuals ALWAYS get a mutual edge to ego
+            # (This includes hub mutuals that also have network edges)
+            for account_id in remaining_mutual:
+                if account_id == ego_id:
+                    continue
+                ego_edges.append(GraphEdge(
+                    src_id=ego_id,
+                    dst_id=account_id,
+                    edge_type="mutual",
+                    weight=1.0
+                ))
+
+            # Second: Non-mutuals WITHOUT network connections get direct ego edges
+            # (This is the fallback for isolated nodes that couldn't route through mutuals)
+            for account_id in remaining_ids:
+                if account_id == ego_id:
+                    continue
+                if account_id in remaining_mutual:
+                    continue  # Already handled above
+                if account_id in accounts_with_network_edges:
+                    continue  # Has network routing, no need for direct edge
+
+                if account_id in remaining_following:
+                    ego_edges.append(GraphEdge(
+                        src_id=ego_id,
+                        dst_id=account_id,
+                        edge_type="you_follow",
+                        weight=0.8
+                    ))
+                elif account_id in remaining_followers:
+                    ego_edges.append(GraphEdge(
+                        src_id=account_id,
+                        dst_id=ego_id,
+                        edge_type="followers_you",
+                        weight=0.6
+                    ))
+
+            all_edges = ego_edges + all_edges
+            logger.info(f"Added {len(ego_edges)} direct ego edges for unconnected accounts")
 
         # Community detection
         communities = simple_community_detection(list(nodes.values()), all_edges)
 
-        # Update nodes with community
+        # Update nodes with community (ego gets community 0)
         for account_id, community_id in communities.items():
             if account_id in nodes:
                 nodes[account_id].community_id = community_id
+        if ego_id and ego_id in nodes:
+            nodes[ego_id].community_id = 0
 
-        # Compute positions
+        # Compute positions (ego pinned at center)
         positions = compute_positions(
-            self.db, interval, list(nodes.values()), all_edges, communities
+            self.db, interval, list(nodes.values()), all_edges, communities, ego_id
         )
 
         # Update nodes with positions
@@ -906,6 +1026,7 @@ class FrameBuilder:
             "interval_id": interval.interval_id,
             "timeframe_days": timeframe_days,
             "timestamp": reference_time.isoformat(),
+            "ego_id": ego_id,
             "nodes": [
                 {
                     "id": n.account_id,
@@ -918,7 +1039,8 @@ class FrameBuilder:
                     "x": round(n.x, 2),
                     "y": round(n.y, 2),
                     "z": round(n.z, 2),
-                    "isNew": n.is_new
+                    "isNew": n.is_new,
+                    "isEgo": n.is_ego
                 }
                 for n in nodes.values()
             ],
@@ -946,7 +1068,8 @@ class FrameBuilder:
         self,
         interval: Interval,
         account_ids: Set[str],
-        new_follower_ids: Set[str]
+        new_follower_ids: Set[str],
+        ego_id: str = None
     ) -> Dict[str, GraphNode]:
         """Load account data for nodes, marking which are new in this interval."""
         accounts = self.db.query(Account).filter(
@@ -955,13 +1078,16 @@ class FrameBuilder:
 
         nodes = {}
         for acc in accounts:
+            is_ego = ego_id and acc.account_id == ego_id
             nodes[acc.account_id] = GraphNode(
                 account_id=acc.account_id,
                 handle=acc.handle,
                 name=acc.name,
                 avatar_url=acc.avatar_url,
                 followers_count=acc.followers_count or 0,
-                is_new=acc.account_id in new_follower_ids
+                is_new=acc.account_id in new_follower_ids,
+                is_ego=is_ego,
+                importance=1.0 if is_ego else 0.0  # Ego has max importance
             )
 
         return nodes
@@ -1039,6 +1165,146 @@ class FrameBuilder:
         
         return frame
     
+    def _build_network_edges(
+        self,
+        account_ids: Set[str],
+        ego_id: str = None,
+        mutual_ids: Set[str] = None,
+        follower_ids: Set[str] = None,
+        following_ids: Set[str] = None
+    ) -> List[GraphEdge]:
+        """
+        Build 6-tier hierarchical edges based on follower counts.
+
+        Creates multi-hop paths instead of starburst:
+        - Tier 1 (100k+) -> Ego
+        - Tier 2 (50k-100k) -> Nearest Tier 1
+        - Tier 3 (10k-50k) -> Nearest Tier 2
+        - Tier 4 (5k-10k) -> Nearest Tier 3
+        - Tier 5 (2k-5k) -> Nearest Tier 4
+        - Tier 6 (<2k) -> Nearest Tier 5
+        """
+        edges = []
+
+        # Get account data
+        accounts = self.db.query(Account).filter(
+            Account.account_id.in_(account_ids)
+        ).all()
+        account_map = {a.account_id: a for a in accounts}
+
+        # Classify all accounts into tiers
+        tier_buckets: Dict[int, List[str]] = defaultdict(list)
+        account_tiers: Dict[str, int] = {}
+
+        for aid in account_ids:
+            if aid == ego_id:
+                continue
+            acc = account_map.get(aid)
+            if not acc:
+                continue
+            tier = classify_follower_tier(acc.followers_count or 0)
+            tier_buckets[tier].append(aid)
+            account_tiers[aid] = tier
+
+        # Sort each tier bucket by follower count (descending)
+        for tier in tier_buckets:
+            tier_buckets[tier].sort(
+                key=lambda x: account_map.get(x, Account()).followers_count or 0,
+                reverse=True
+            )
+
+        # Log tier distribution
+        tier_counts = {t: len(ids) for t, ids in tier_buckets.items()}
+        logger.info(f"Tier distribution: {tier_counts}")
+
+        def find_nearest_in_tier(account_id: str, target_tier: int) -> Optional[str]:
+            """Find nearest account in target tier by follower count similarity."""
+            candidates = tier_buckets.get(target_tier, [])
+            if not candidates:
+                return None
+
+            acc = account_map.get(account_id)
+            if not acc:
+                return candidates[0] if candidates else None
+
+            acc_followers = acc.followers_count or 1
+            best_match = None
+            best_ratio = float('inf')
+
+            # Check top candidates in tier (limit for performance)
+            for cid in candidates[:50]:
+                c_acc = account_map.get(cid)
+                if not c_acc:
+                    continue
+                c_followers = c_acc.followers_count or 1
+                # Ratio of larger to smaller - closer to 1 is better match
+                ratio = max(acc_followers, c_followers) / max(min(acc_followers, c_followers), 1)
+                if ratio < best_ratio:
+                    best_ratio = ratio
+                    best_match = cid
+
+            return best_match or (candidates[0] if candidates else None)
+
+        def find_any_higher_tier(account_id: str, current_tier: int) -> Optional[tuple]:
+            """Find any account in a higher tier, searching upward."""
+            for search_tier in range(current_tier - 1, 0, -1):
+                target = find_nearest_in_tier(account_id, search_tier)
+                if target:
+                    return (target, search_tier)
+            return None
+
+        # Build hierarchical edges from lowest tier to highest
+        for tier in range(6, 0, -1):
+            accounts_in_tier = tier_buckets.get(tier, [])
+
+            for aid in accounts_in_tier:
+                # Mutuals are handled separately (connect to ego)
+                if mutual_ids and aid in mutual_ids:
+                    continue
+
+                if tier == 1:
+                    # Tier 1 connects directly to ego
+                    if ego_id:
+                        edges.append(GraphEdge(
+                            src_id=aid,
+                            dst_id=ego_id,
+                            edge_type=TIER_EDGE_TYPES[tier],
+                            weight=TIER_WEIGHTS[tier]
+                        ))
+                else:
+                    # Try to connect to the tier immediately above
+                    target = find_nearest_in_tier(aid, tier - 1)
+
+                    if target:
+                        edges.append(GraphEdge(
+                            src_id=aid,
+                            dst_id=target,
+                            edge_type=TIER_EDGE_TYPES[tier],
+                            weight=TIER_WEIGHTS[tier]
+                        ))
+                    else:
+                        # No accounts in tier above, search further up
+                        result = find_any_higher_tier(aid, tier)
+                        if result:
+                            target, found_tier = result
+                            edges.append(GraphEdge(
+                                src_id=aid,
+                                dst_id=target,
+                                edge_type=TIER_EDGE_TYPES[tier],
+                                weight=TIER_WEIGHTS[tier] * 0.8  # Slightly lower for skip
+                            ))
+                        elif ego_id and tier <= 3:
+                            # High-tier fallback: connect to ego if no other option
+                            edges.append(GraphEdge(
+                                src_id=aid,
+                                dst_id=ego_id,
+                                edge_type="fallback_ego",
+                                weight=0.4
+                            ))
+
+        logger.info(f"Created {len(edges)} hierarchical edges")
+        return edges
+
     def build_and_save(
         self,
         interval_id: int,
@@ -1049,10 +1315,10 @@ class FrameBuilder:
         interval = self.db.query(Interval).filter(
             Interval.interval_id == interval_id
         ).first()
-        
+
         if not interval:
             raise ValueError(f"Interval {interval_id} not found")
-        
+
         frame_data = self.build_frame(interval, timeframe_days, ego_id)
         return self.save_frame(interval, frame_data, timeframe_days)
     

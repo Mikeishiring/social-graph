@@ -9,7 +9,10 @@ import {
   EDGE_OPACITY,
   NODE_TIERS,
 } from '../graphTheme';
-import { playHoverSound, playClickSound } from '../sounds';
+import { playHoverSound, playClickSound, playBubblePopSound } from '../sounds';
+import { HeartbeatPulse } from './effects/HeartbeatPulse';
+import { NodePersonality } from './effects/NodePersonality';
+import { RippleEffect } from './effects/RippleEffect';
 
 interface GraphViewerProps {
   data: GraphData;
@@ -18,6 +21,8 @@ interface GraphViewerProps {
   selectedNode: GraphNode | null;
   highlightedNodeIds?: Set<string>;
   focusMode?: boolean;
+  heartbeatEnabled?: boolean;
+  personalityEnabled?: boolean;
 }
 
 // Calculate node tier based on importance percentile
@@ -159,7 +164,10 @@ function AvatarNode({
     node.avatar || 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect fill="%2394a3b8" width="64" height="64"/><text x="32" y="40" font-size="28" fill="white" text-anchor="middle">' + (node.handle || node.id)[0].toUpperCase() + '</text></svg>'),
   );
 
-  // Entrance animation with spring physics
+  // Track if we've played the pop sound
+  const hasPlayedPop = useRef(false);
+
+  // Entrance animation with bubble pop physics
   useFrame((state) => {
     // Handle entrance animation
     if (entranceStartTime.current === null) {
@@ -168,10 +176,21 @@ function AvatarNode({
 
     const elapsed = state.clock.elapsedTime - entranceStartTime.current;
     if (elapsed > 0 && entranceScale < 1) {
-      // Spring-like ease out
-      const t = Math.min(1, elapsed / 0.4);
-      const spring = 1 - Math.pow(1 - t, 3) * Math.cos(t * Math.PI * 2) * 0.3;
-      setEntranceScale(Math.min(1, spring));
+      // Bubble pop easing: elastic overshoot then settle
+      const t = Math.min(1, elapsed / 0.5);
+      // Elastic ease-out with overshoot
+      const c4 = (2 * Math.PI) / 3;
+      const bubble = t === 0 ? 0 : t === 1 ? 1
+        : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * c4) + 1;
+      setEntranceScale(Math.min(1.0, Math.max(0, bubble)));
+
+      // Play pop sound at peak of overshoot (around t=0.3)
+      if (!hasPlayedPop.current && t > 0.25 && t < 0.4) {
+        // Pitch based on node size (smaller nodes = higher pitch)
+        const pitch = 0.8 + (1 - size / 3) * 0.6;
+        playBubblePopSound(pitch);
+        hasPlayedPop.current = true;
+      }
     }
 
     // Handle selection/hover animations
@@ -293,9 +312,13 @@ function DotNode({
 
     const elapsed = state.clock.elapsedTime - entranceStartTime.current;
     if (elapsed > 0 && entranceScale < 1) {
-      // Quick pop-in
-      const t = Math.min(1, elapsed / 0.3);
-      setEntranceScale(1 - Math.pow(1 - t, 3));
+      // Bubble pop for dots - simpler but still bouncy
+      const t = Math.min(1, elapsed / 0.35);
+      // Quick elastic pop
+      const bounce = t < 0.6
+        ? 1.15 * (1 - Math.pow(1 - t / 0.6, 3))  // Overshoot to 1.15
+        : 1 + 0.15 * Math.pow(1 - (t - 0.6) / 0.4, 2);  // Settle back to 1
+      setEntranceScale(Math.min(1, bounce));
     }
 
     if (meshRef.current) {
@@ -363,6 +386,8 @@ function NodeMesh({
   entranceDelay,
   onHover,
   onClick,
+  nodeCount,
+  personalityEnabled,
 }: {
   node: GraphNode;
   maxImportance: number;
@@ -374,7 +399,30 @@ function NodeMesh({
   entranceDelay: number;
   onHover: (node: GraphNode | null) => void;
   onClick: (node: GraphNode) => void;
+  nodeCount: number;
+  personalityEnabled: boolean;
 }) {
+  // Disable personality animation for performance when many nodes, or when toggled off
+  const enablePersonality = personalityEnabled && nodeCount < 600 && !hasSelection;
+
+  // Ego node gets special treatment - much larger, always shows avatar
+  if (node.isEgo) {
+    return (
+      <NodePersonality nodeId={node.id} enabled={false}>
+        <AvatarNode
+          node={node}
+          size={5.0}  // Much larger than other nodes
+          ringWidth={0.3}
+          isSelected={true}  // Always appear selected
+          opacity={1}
+          entranceDelay={0}  // Appear first
+          onHover={onHover}
+          onClick={onClick}
+        />
+      </NodePersonality>
+    );
+  }
+
   const tier = getNodeTier(node.importance, maxImportance);
 
   // Calculate size within tier range
@@ -394,44 +442,50 @@ function NodeMesh({
 
   if (showAvatar) {
     return (
-      <AvatarNode
+      <NodePersonality nodeId={node.id} enabled={enablePersonality}>
+        <AvatarNode
+          node={node}
+          size={size}
+          ringWidth={tier.ringWidth}
+          isSelected={isSelected}
+          opacity={opacity}
+          entranceDelay={entranceDelay}
+          onHover={onHover}
+          onClick={onClick}
+        />
+      </NodePersonality>
+    );
+  }
+
+  return (
+    <NodePersonality nodeId={node.id} enabled={enablePersonality}>
+      <DotNode
         node={node}
         size={size}
-        ringWidth={tier.ringWidth}
         isSelected={isSelected}
+        isHighlighted={isHighlighted}
         opacity={opacity}
         entranceDelay={entranceDelay}
         onHover={onHover}
         onClick={onClick}
       />
-    );
-  }
-
-  return (
-    <DotNode
-      node={node}
-      size={size}
-      isSelected={isSelected}
-      isHighlighted={isHighlighted}
-      opacity={opacity}
-      entranceDelay={entranceDelay}
-      onHover={onHover}
-      onClick={onClick}
-    />
+    </NodePersonality>
   );
 }
 
-// Subtle edge line
+// Subtle edge line with directional colors
 function EdgeLine({
   start,
   end,
   isHighlighted,
   isSelected,
+  edgeType,
 }: {
   start: [number, number, number];
   end: [number, number, number];
   isHighlighted: boolean;
   isSelected: boolean;
+  edgeType: string;
 }) {
   const lineRef = useRef<THREE.Line>(null);
 
@@ -440,15 +494,40 @@ function EdgeLine({
     return new THREE.BufferGeometry().setFromPoints(points);
   }, [start, end]);
 
-  // All edges same muted color
-  const color = isSelected
-    ? EDGE_COLORS.selected
-    : (isHighlighted ? EDGE_COLORS.highlight : EDGE_COLORS.default);
+  // Get color based on edge type
+  const getEdgeColor = () => {
+    if (isSelected) return EDGE_COLORS.selected;
+    if (isHighlighted) return EDGE_COLORS.highlight;
 
-  // Subtle opacity
+    // Check for tier-based colors first
+    const tierColor = EDGE_COLORS[edgeType as keyof typeof EDGE_COLORS];
+    if (tierColor) return tierColor;
+
+    // Directional edge colors
+    switch (edgeType) {
+      case 'you_follow':
+        return EDGE_COLORS.you_follow;  // Blue - you follow them
+      case 'followers_you':
+        return EDGE_COLORS.followers_you;  // Green - they follow you
+      case 'mutual':
+        return EDGE_COLORS.mutual;  // Purple - mutual
+      case 'ego_connection':
+        return EDGE_COLORS.ego;
+      case 'network':
+        return EDGE_COLORS.network;  // Gray - connections between others
+      default:
+        return EDGE_COLORS.default;
+    }
+  };
+
+  // Ego-related, tier, and network edges are more visible
+  const isTierEdge = edgeType.startsWith('tier_') || edgeType === 'fallback_ego';
+  const isEgoRelated = isTierEdge || ['you_follow', 'followers_you', 'mutual', 'ego_connection', 'network'].includes(edgeType);
   const opacity = isSelected
     ? EDGE_OPACITY.selected
-    : (isHighlighted ? EDGE_OPACITY.hover : EDGE_OPACITY.default);
+    : (isEgoRelated ? EDGE_OPACITY.ego : (isHighlighted ? EDGE_OPACITY.hover : EDGE_OPACITY.default));
+
+  const color = getEdgeColor();
 
   const material = useMemo(() => {
     return new THREE.LineBasicMaterial({
@@ -564,6 +643,8 @@ export default function GraphViewer({
   selectedNode,
   highlightedNodeIds,
   focusMode = true,
+  heartbeatEnabled = true,
+  personalityEnabled = true,
 }: GraphViewerProps) {
   const { camera } = useThree();
   const [dynamicLabelCap, setDynamicLabelCap] = useState(10);
@@ -573,10 +654,61 @@ export default function GraphViewer({
   const focusDim = highlightActive && focusMode;
   const [dataKey, setDataKey] = useState(0);
 
-  // Reset entrance animations when data changes
+  // Progressive edge disclosure - start with 20, grow to 100 max
+  const [visibleEdgeLimit, setVisibleEdgeLimit] = useState(20);
+
+  // Ripple effect state - triggered on node click
+  const [rippleNode, setRippleNode] = useState<GraphNode | null>(null);
+
+  // Handle node click with ripple effect
+  const handleNodeClick = (node: GraphNode | null) => {
+    if (node) {
+      setRippleNode(node);
+    }
+    onNodeClick(node);
+  };
+
+  // Reset entrance animations and edge limit when data changes
   useEffect(() => {
     setDataKey((k) => k + 1);
+    setVisibleEdgeLimit(20); // Reset to initial state
   }, [data.nodes.length]);
+
+  // Progressive edge reveal - grow from 20 to 100 over 3 seconds
+  useEffect(() => {
+    if (visibleEdgeLimit >= 100) return;
+    const timer = setInterval(() => {
+      setVisibleEdgeLimit((prev) => Math.min(prev + 10, 100));
+    }, 300);
+    return () => clearInterval(timer);
+  }, [visibleEdgeLimit, data.nodes.length]);
+
+  // Sort edges by importance (tier + weight) for progressive reveal
+  const sortedEdges = useMemo(() => {
+    const tierPriority: Record<string, number> = {
+      mutual: 7,
+      tier_1_ego: 6,
+      you_follow: 5,
+      tier_2_hub: 5,
+      followers_you: 4,
+      tier_3_bridge: 4,
+      tier_4_cluster: 3,
+      tier_5_outer: 2,
+      tier_6_leaf: 1,
+      fallback_ego: 1,
+    };
+    return [...data.edges].sort((a, b) => {
+      const aPriority = tierPriority[a.type] || 0;
+      const bPriority = tierPriority[b.type] || 0;
+      if (aPriority !== bPriority) return bPriority - aPriority;
+      return b.weight - a.weight;
+    });
+  }, [data.edges]);
+
+  // Visible edges based on current limit
+  const visibleEdges = useMemo(() => {
+    return sortedEdges.slice(0, visibleEdgeLimit);
+  }, [sortedEdges, visibleEdgeLimit]);
 
   // Calculate max importance for scaling
   const maxImportance = useMemo(() => {
@@ -624,28 +756,28 @@ export default function GraphViewer({
     return map;
   }, [data.nodes]);
 
-  // Connected nodes for selection highlighting
+  // Connected nodes for selection highlighting (use visible edges)
   const connectedNodes = useMemo(() => {
     if (!selectedNode) return new Set<string>();
     const connected = new Set<string>();
-    data.edges.forEach((edge) => {
+    visibleEdges.forEach((edge) => {
       if (edge.source === selectedNode.id) connected.add(edge.target);
       if (edge.target === selectedNode.id) connected.add(edge.source);
     });
     return connected;
-  }, [selectedNode, data.edges]);
+  }, [selectedNode, visibleEdges]);
 
-  // Highlighted edges
+  // Highlighted edges (use visible edges)
   const highlightedEdges = useMemo(() => {
     if (!selectedNode) return new Set<string>();
     const edges = new Set<string>();
-    data.edges.forEach((edge) => {
+    visibleEdges.forEach((edge) => {
       if (edge.source === selectedNode.id || edge.target === selectedNode.id) {
         edges.add(`${edge.source}-${edge.target}`);
       }
     });
     return edges;
-  }, [selectedNode, data.edges]);
+  }, [selectedNode, visibleEdges]);
 
   // Calculate entrance delays based on importance (more important = earlier)
   const entranceDelays = useMemo(() => {
@@ -661,25 +793,50 @@ export default function GraphViewer({
   const baseLabelCap = data.nodes.length > 600 ? 0 : (data.nodes.length > 300 ? 6 : 10);
   const labelCap = Math.min(baseLabelCap, dynamicLabelCap);
 
+  // Find the ego node for heartbeat effect
+  const egoNode = useMemo(() => data.nodes.find(n => n.isEgo), [data.nodes]);
+
   return (
     <group key={dataKey}>
       {/* Ambient floating particles */}
       <AmbientParticles bounds={graphBounds} />
 
-      {/* Edges - render first (behind nodes) */}
-      {data.edges.map((edge, idx) => {
+      {/* Heartbeat pulse emanating from ego node */}
+      {egoNode && (
+        <HeartbeatPulse
+          position={[egoNode.x, egoNode.y, egoNode.z - 0.5]}
+          enabled={heartbeatEnabled && !selectedNode}  // Disable when node selected or toggled off
+          baseSize={5}
+        />
+      )}
+
+      {/* Ripple effect on node click */}
+      <RippleEffect
+        sourceNode={rippleNode}
+        nodes={data.nodes}
+        edges={data.edges}
+        onComplete={() => setRippleNode(null)}
+      />
+
+      {/* Edges - render first (behind nodes) - progressive disclosure */}
+      {visibleEdges.map((edge, idx) => {
         const sourceNode = nodeMap.get(edge.source);
         const targetNode = nodeMap.get(edge.target);
 
         if (!sourceNode || !targetNode) return null;
+
+        // Check if this is an ego-related edge (directional connections or tier hierarchy)
+        const isTierEdge = edge.type.startsWith('tier_') || edge.type === 'fallback_ego';
+        const isEgoRelated = isTierEdge || ['you_follow', 'followers_you', 'mutual', 'ego_connection'].includes(edge.type);
 
         const isEdgeHighlighted = selectedNode
           ? highlightedEdges.has(`${edge.source}-${edge.target}`)
           : (highlightActive && highlightSet.has(edge.source) && highlightSet.has(edge.target));
 
         // Hide non-connected edges when selection/highlight active
-        if (selectedNode && !isEdgeHighlighted) return null;
-        if (focusDim && !isEdgeHighlighted) return null;
+        // BUT always show ego-related edges (your connections)
+        if (selectedNode && !isEdgeHighlighted && !isEgoRelated) return null;
+        if (focusDim && !isEdgeHighlighted && !isEgoRelated) return null;
 
         return (
           <EdgeLine
@@ -688,6 +845,7 @@ export default function GraphViewer({
             end={[targetNode.x, targetNode.y, targetNode.z]}
             isHighlighted={isEdgeHighlighted && !selectedNode}
             isSelected={isEdgeHighlighted && !!selectedNode}
+            edgeType={edge.type}
           />
         );
       })}
@@ -705,7 +863,9 @@ export default function GraphViewer({
           hasHighlight={focusDim}
           entranceDelay={entranceDelays.get(node.id) ?? 0}
           onHover={onNodeHover}
-          onClick={onNodeClick}
+          onClick={handleNodeClick}
+          nodeCount={data.nodes.length}
+          personalityEnabled={personalityEnabled}
         />
       ))}
 

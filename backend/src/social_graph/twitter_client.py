@@ -26,7 +26,7 @@ class TwitterClient:
         self.api_key = api_key or settings.twitter_bearer_token
         self.client = httpx.AsyncClient(
             base_url=self.BASE_URL,
-            headers={"X-API-Key": self.api_key},
+            headers={"x-api-key": self.api_key},
             timeout=60.0
         )
 
@@ -120,7 +120,8 @@ class TwitterClient:
 
             yield (users, cursor_in, cursor_out, truncated)
 
-            if not cursor_out or (max_pages and page_count >= max_pages):
+            # Stop if: no more cursor, hit max pages, or empty page (all data retrieved)
+            if not cursor_out or (max_pages and page_count >= max_pages) or len(users) == 0:
                 break
 
             cursor = cursor_out
@@ -161,24 +162,33 @@ class TwitterClient:
 
             yield (users, cursor_in, cursor_out, truncated)
 
-            if not cursor_out or (max_pages and page_count >= max_pages):
+            # Stop if: no more cursor, hit max pages, or empty page (all data retrieved)
+            if not cursor_out or (max_pages and page_count >= max_pages) or len(users) == 0:
                 break
 
             cursor = cursor_out
 
     def _normalize_user(self, user: dict) -> dict:
-        """Normalize twitterapi.io user format to standard format."""
+        """Normalize twitterapi.io user format to standard format with all available fields."""
         return {
             "id": user.get("id"),
             "username": user.get("userName"),
             "name": user.get("name"),
             "profile_image_url": user.get("profilePicture"),
+            "cover_image_url": user.get("coverPicture"),
             "description": user.get("description", ""),
+            "location": user.get("location"),
             "public_metrics": {
                 "followers_count": user.get("followers", 0),
                 "following_count": user.get("following", 0),
+                "tweet_count": user.get("statusesCount", 0),
+                "media_count": user.get("mediaCount", 0),
+                "favourites_count": user.get("favouritesCount", 0),
             },
             "created_at": user.get("createdAt"),
+            "is_automated": user.get("isAutomated", False),
+            "possibly_sensitive": user.get("possiblySensitive", False),
+            "can_dm": user.get("canDm"),
         }
 
     async def get_user_tweets(

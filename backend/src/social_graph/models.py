@@ -67,18 +67,25 @@ class Run(Base):
 class Account(Base):
     """Twitter account - canonical record."""
     __tablename__ = "accounts"
-    
+
     account_id: Mapped[str] = mapped_column(String(64), primary_key=True)  # Twitter user ID
     handle: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
     name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     avatar_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cover_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Cover/banner image
     bio: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # User-set location
     followers_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     following_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     tweet_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    media_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # Photos/videos posted
+    favourites_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # Likes given
+    is_automated: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # Bot indicator
+    possibly_sensitive: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # NSFW flag
+    can_dm: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # DM accessibility
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
-    
+
     # Relationships
     posts: Mapped[list["Post"]] = relationship(back_populates="author")
 
@@ -119,14 +126,17 @@ class Snapshot(Base):
 class SnapshotFollower(Base):
     """Follower membership in a snapshot."""
     __tablename__ = "snapshot_followers"
-    
+
     id: Mapped[int] = mapped_column(primary_key=True)
     snapshot_id: Mapped[int] = mapped_column(ForeignKey("snapshots.snapshot_id"), index=True)
     account_id: Mapped[str] = mapped_column(ForeignKey("accounts.account_id"), index=True)
-    
+    # Position in API response (0 = newest follower, higher = older)
+    # Since API returns newest-first, lower position = followed more recently
+    follow_position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     # Relationships
     snapshot: Mapped["Snapshot"] = relationship(back_populates="followers")
-    
+
     __table_args__ = (
         UniqueConstraint("snapshot_id", "account_id", name="uq_snapshot_follower"),
     )
@@ -325,6 +335,33 @@ class PostAttribution(Base):
 
     __table_args__ = (
         UniqueConstraint("post_id", "timeframe_window", name="uq_post_attribution"),
+    )
+
+
+# =============================================================================
+# NETWORK EDGES (second-degree connections)
+# =============================================================================
+
+class NetworkConnection(Base):
+    """
+    Stores follow relationships between any two accounts in the network.
+    This enables routing/path finding through the social graph.
+
+    Example: If account A follows account B, we store:
+    - follower_id = A
+    - following_id = B
+    """
+    __tablename__ = "network_connections"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    follower_id: Mapped[str] = mapped_column(String(64), index=True)  # Who is following
+    following_id: Mapped[str] = mapped_column(String(64), index=True)  # Who they follow
+    discovered_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("follower_id", "following_id", name="uq_network_connection"),
+        Index("ix_network_follower", "follower_id"),
+        Index("ix_network_following", "following_id"),
     )
 
 

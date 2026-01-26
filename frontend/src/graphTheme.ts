@@ -15,14 +15,29 @@ export const EDGE_COLORS = {
   default: '#64748b',      // slate-500 - more visible
   highlight: '#475569',    // slate-600
   selected: '#334155',     // slate-700
+  ego: '#3b82f6',          // blue-500 - YOUR connections (legacy)
+  // Directional edge colors
+  you_follow: '#3b82f6',   // blue-500 - people YOU follow
+  followers_you: '#22c55e', // green-500 - people who follow YOU
+  mutual: '#a855f7',       // purple-500 - mutual connections
+  network: '#94a3b8',      // slate-400 - connections between others in your network
+  // 6-Tier hierarchical colors (warm to cool gradient)
+  tier_1_ego: '#ef4444',      // red-500 - direct to ego (100k+)
+  tier_2_hub: '#f97316',      // orange-500 - major hubs (50k-100k)
+  tier_3_bridge: '#eab308',   // yellow-500 - bridge nodes (10k-50k)
+  tier_4_cluster: '#22c55e',  // green-500 - cluster cores (5k-10k)
+  tier_5_outer: '#06b6d4',    // cyan-500 - outer ring (2k-5k)
+  tier_6_leaf: '#94a3b8',     // slate-400 - leaf nodes (<2k)
+  fallback_ego: '#3b82f6',    // blue-500 - fallback to ego
 };
 
 // Edge opacity levels - increased for visibility
 export const EDGE_OPACITY = {
-  default: 0.6,
+  default: 0.4,
+  ego: 0.7,                // Your connections more visible
   hover: 0.8,
   selected: 0.9,
-  dimmed: 0.25,
+  dimmed: 0.15,
 };
 
 // Node size thresholds (by importance percentile)
