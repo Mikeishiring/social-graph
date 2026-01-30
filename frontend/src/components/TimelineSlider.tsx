@@ -203,9 +203,26 @@ export default function TimelineSlider({
     }));
   }, [frames.length, frameIndexByInterval, posts]);
 
+  const growthBars = useMemo(() => {
+    if (frames.length === 0) return [];
+    const newCounts = frames.map((frame) => frame.new_followers_count ?? 0);
+    const lostCounts = frames.map((frame) => frame.lost_followers_count ?? 0);
+    const maxNew = Math.max(...newCounts, 1);
+    const maxLost = Math.max(...lostCounts, 1);
+    return frames.map((frame, index) => ({
+      index,
+      newCount: newCounts[index] ?? 0,
+      lostCount: lostCounts[index] ?? 0,
+      newIntensity: (newCounts[index] ?? 0) / maxNew,
+      lostIntensity: (lostCounts[index] ?? 0) / maxLost,
+    }));
+  }, [frames]);
+
   // Node/edge count for current frame
   const nodeCount = currentFrame?.node_count ?? 0;
   const edgeCount = currentFrame?.edge_count ?? 0;
+  const newFollowers = currentFrame?.new_followers_count ?? 0;
+  const lostFollowers = currentFrame?.lost_followers_count ?? 0;
 
   useEffect(() => {
     if (!openGroupKey) return;
@@ -243,6 +260,12 @@ export default function TimelineSlider({
               </span>
               <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 font-mono">
                 {edgeCount} edges
+              </span>
+              <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-600 font-mono">
+                +{newFollowers}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-600 font-mono">
+                -{lostFollowers}
               </span>
             </div>
           </div>
@@ -354,6 +377,35 @@ export default function TimelineSlider({
 
         {/* Timeline scrubber */}
         <div className="relative mt-2">
+          {/* Growth spikes */}
+          {growthBars.length > 0 && (
+            <div className="absolute inset-x-0 -top-9 h-4 flex items-end gap-[1px] pointer-events-none px-1">
+              {growthBars.map((bar) => {
+                const newHeight = Math.max(2, Math.round(10 * bar.newIntensity));
+                const lostHeight = Math.max(1, Math.round(8 * bar.lostIntensity));
+                const isCurrent = bar.index === currentIndex;
+                return (
+                  <div key={bar.index} className="flex-1 flex flex-col items-center justify-end gap-[1px]">
+                    <span
+                      className={`w-full rounded-t-sm transition-all ${
+                        isCurrent ? 'bg-emerald-500' : 'bg-emerald-300'
+                      }`}
+                      style={{ height: `${newHeight}px`, opacity: isCurrent ? 1 : 0.6 }}
+                    />
+                    {bar.lostCount > 0 && (
+                      <span
+                        className={`w-full rounded-t-sm transition-all ${
+                          isCurrent ? 'bg-rose-500' : 'bg-rose-300'
+                        }`}
+                        style={{ height: `${lostHeight}px`, opacity: isCurrent ? 0.9 : 0.5 }}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {/* Density bars */}
           {densityBars.length > 0 && (
             <div className="absolute inset-x-0 -top-5 h-5 flex items-end gap-[1px] pointer-events-none px-1">

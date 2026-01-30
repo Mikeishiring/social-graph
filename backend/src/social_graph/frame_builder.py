@@ -500,6 +500,20 @@ def compute_positions(
         adjacency[edge.src_id].append((edge.dst_id, edge.weight))
         adjacency[edge.dst_id].append((edge.src_id, edge.weight))
     
+    # Precompute community centroids (for clustered layout)
+    unique_communities = sorted(set(communities.values())) if communities else [0]
+    community_index = {cid: idx for idx, cid in enumerate(unique_communities)}
+    community_positions: Dict[int, Tuple[float, float, float]] = {}
+    base_radius = 60.0
+    for cid in unique_communities:
+        idx = community_index[cid]
+        angle = idx * 2.0 * math.pi / max(len(unique_communities), 1)
+        community_positions[cid] = (
+            base_radius * math.cos(angle),
+            base_radius * math.sin(angle),
+            random.uniform(-8, 8)
+        )
+
     # Initialize positions
     positions: Dict[str, Tuple[float, float, float]] = {}
     
@@ -527,16 +541,13 @@ def compute_positions(
                         break
             
             if node.account_id not in positions:
-                # Use community-based positioning
+                # Use community-based clustered positioning
                 community = communities.get(node.account_id, 0)
-                num_communities = max(len(set(communities.values())), 1)
-                angle = community * 2.0 * math.pi / num_communities
-                radius = 50 + (hash(node.account_id) % 30)
-                
+                cx, cy, cz = community_positions.get(community, (0.0, 0.0, 0.0))
                 positions[node.account_id] = (
-                    radius * math.cos(angle) + random.uniform(-5, 5),
-                    radius * math.sin(angle) + random.uniform(-5, 5),
-                    random.uniform(-10, 10)
+                    cx + random.uniform(-10, 10),
+                    cy + random.uniform(-10, 10),
+                    cz + random.uniform(-6, 6)
                 )
     
     # Pin ego at center before layout
@@ -544,7 +555,15 @@ def compute_positions(
         positions[ego_id] = (0.0, 0.0, 0.0)
 
     # Simple force-directed relaxation (bounded iterations)
-    positions = force_directed_layout(nodes, edges, positions, max_iterations=50, ego_id=ego_id)
+    positions = force_directed_layout(
+        nodes,
+        edges,
+        positions,
+        max_iterations=60,
+        ego_id=ego_id,
+        communities=communities,
+        community_centroids=community_positions
+    )
 
     return positions
 
@@ -555,7 +574,9 @@ def force_directed_layout(
     initial_positions: Dict[str, Tuple[float, float, float]],
     max_iterations: int = 50,
     cooling_factor: float = 0.95,
-    ego_id: str = None
+    ego_id: str = None,
+    communities: Optional[Dict[str, int]] = None,
+    community_centroids: Optional[Dict[int, Tuple[float, float, float]]] = None
 ) -> Dict[str, Tuple[float, float, float]]:
     """
     Simple 3D force-directed layout with ego node pinned at center.
@@ -572,8 +593,9 @@ def force_directed_layout(
         positions[ego_id] = (0.0, 0.0, 0.0)
 
     # Parameters
-    k_repulsion = 1000.0  # Repulsion constant
-    k_attraction = 0.01   # Attraction constant
+    k_repulsion = 700.0   # Repulsion constant
+    k_attraction = 0.02   # Attraction constant
+    k_community = 0.03    # Community clustering force
     temperature = 10.0    # Initial movement limit
 
     node_ids = [n.account_id for n in nodes]
@@ -638,6 +660,24 @@ def force_directed_layout(
             
             forces[edge.src_id] = (forces[edge.src_id][0] + fx, forces[edge.src_id][1] + fy, forces[edge.src_id][2] + fz)
             forces[edge.dst_id] = (forces[edge.dst_id][0] - fx, forces[edge.dst_id][1] - fy, forces[edge.dst_id][2] - fz)
+
+        # Community clustering toward centroid
+        if communities and community_centroids:
+            for nid in node_ids:
+                if nid not in positions:
+                    continue
+                cid = communities.get(nid, 0)
+                cx, cy, cz = community_centroids.get(cid, (0.0, 0.0, 0.0))
+                x, y, z = positions[nid]
+                dx = cx - x
+                dy = cy - y
+                dz = cz - z
+                dist = math.sqrt(dx * dx + dy * dy + dz * dz) + 0.01
+                force = k_community * dist
+                fx = force * dx / dist
+                fy = force * dy / dist
+                fz = force * dz / dist
+                forces[nid] = (forces[nid][0] + fx, forces[nid][1] + fy, forces[nid][2] + fz)
         
         # Apply forces with temperature limit
         for nid in node_ids:

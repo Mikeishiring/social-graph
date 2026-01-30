@@ -249,9 +249,9 @@ frames(interval_id, timeframe_window, frame_json, node_count, edge_count, build_
 | M0: Data spine | ✅ Complete | 100% |
 | M1: Frame builder + 3D | ✅ Complete | 100% |
 | M2: Timeline replay | ✅ Complete | 100% |
-| M3: Post overlay | ✅ Mock Complete | 100% |
+| M3: Post overlay | ✅ Mock Complete (inferred pings) | 100% |
 
-**Overall: 100% (mock data)**
+**Overall: 100% (mock data + inferred pings; real engagement wired in)**
 
 ### M0 Completed Items
 - ✅ Python project structure (FastAPI + SQLAlchemy)
@@ -293,6 +293,11 @@ frames(interval_id, timeframe_window, frame_json, node_count, edge_count, build_
 - ✅ Post inspector panel with attribution breakdown and evidence list
 - ✅ Highlighted attributed follower clusters in graph
 - ✅ Mock post generator aligned to interval playback
+- ✅ Action pings layer (inferred from attributions when real events are absent)
+- ✅ Growth spike annotations on the timeline
+- ✅ Post effectiveness scoreboard
+- ✅ Before/after compare panel (interval diffs)
+- ✅ Collector stores replies/quotes/retweeters/mentions when API data is available (likes not exposed)
 
 ### Setup Required
 ```bash

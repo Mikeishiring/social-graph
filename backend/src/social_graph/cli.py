@@ -15,7 +15,7 @@ def cmd_init(args):
     """Initialize the database."""
     print("Initializing database...")
     init_db()
-    print("✓ Database initialized successfully")
+    print("Database initialized successfully")
 
 
 async def cmd_collect_async(args):
@@ -39,7 +39,7 @@ async def cmd_collect_async(args):
                 max_pages=args.max_pages
             )
             
-            print(f"\n✓ Collection completed!")
+            print(f"\nCollection completed!")
             print(f"  Run ID: {result['run_id']}")
             print(f"  User ID: {result['user_id']}")
             print(f"  Followers: {result['followers_count']}")
@@ -62,7 +62,7 @@ async def cmd_collect_async(args):
             return result
             
     except Exception as e:
-        print(f"\n✗ Collection failed: {e}")
+        print(f"\nCollection failed: {e}")
         raise
     finally:
         db.close()
@@ -153,7 +153,7 @@ def cmd_intervals(args):
         print("-" * 70)
         for interval in intervals:
             print(f"  #{interval.interval_id}")
-            print(f"    Period: {interval.start_at} → {interval.end_at}")
+            print(f"    Period: {interval.start_at} -> {interval.end_at}")
             print(f"    New followers: +{interval.new_followers_count}")
             print(f"    Lost followers: -{interval.lost_followers_count}")
             print()

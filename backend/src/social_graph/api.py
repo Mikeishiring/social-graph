@@ -1,5 +1,6 @@
 """FastAPI application for Social Graph."""
 from datetime import datetime
+import json
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +8,16 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .database import get_db, init_db
-from .models import Run, Snapshot, Interval, Account, FollowEvent
+from .models import (
+    Run,
+    Snapshot,
+    Interval,
+    Account,
+    FollowEvent,
+    InteractionEvent,
+    PostEngager,
+    PostAttribution,
+)
 from .collector import Collector
 from .twitter_client import TwitterClient
 from .frame_builder import FrameBuilder
@@ -92,6 +102,107 @@ class IntervalSummary(BaseModel):
 # =============================================================================
 # Endpoints
 # =============================================================================
+
+def _limit_events(events: list[dict], limit: int) -> list[dict]:
+    if len(events) <= limit:
+        return events
+    step = max(1, len(events) // max(limit, 1))
+    return events[::step][:limit]
+
+
+def _build_action_events(
+    db: Session,
+    interval_id: int,
+    timeframe_window: int,
+    limit: int = 200,
+) -> list[dict]:
+    """Build action ping events for the UI, with inferred fallback."""
+    interval = db.query(Interval).filter(Interval.interval_id == interval_id).first()
+    if not interval:
+        return []
+
+    events: list[dict] = []
+    dedupe: set[tuple] = set()
+
+    interactions = db.query(InteractionEvent).filter(
+        InteractionEvent.interval_id == interval_id
+    ).all()
+    for event in interactions:
+        key = (event.src_id, event.post_id, event.interaction_type)
+        if key in dedupe:
+            continue
+        dedupe.add(key)
+        events.append({
+            "account_id": event.src_id,
+            "type": event.interaction_type,
+            "post_id": event.post_id,
+            "created_at": event.created_at.isoformat() if event.created_at else None,
+            "strength": 1.0,
+            "inferred": False,
+        })
+
+    engagers = db.query(PostEngager).filter(
+        PostEngager.interval_id == interval_id
+    ).all()
+    for engager in engagers:
+        key = (engager.account_id, engager.post_id, engager.engager_type)
+        if key in dedupe:
+            continue
+        dedupe.add(key)
+        events.append({
+            "account_id": engager.account_id,
+            "type": engager.engager_type,
+            "post_id": engager.post_id,
+            "created_at": interval.end_at.isoformat() if interval.end_at else None,
+            "strength": 0.9,
+            "inferred": False,
+        })
+
+    if events:
+        return _limit_events(events, limit)
+
+    # Fallback: infer lightweight action pings from post attributions
+    inferred_events: list[dict] = []
+    attribution_rows = db.query(PostAttribution).filter(
+        PostAttribution.interval_id == interval_id,
+        PostAttribution.timeframe_window == timeframe_window,
+    ).all()
+
+    for row in attribution_rows:
+        try:
+            payload = json.loads(row.payload_json)
+        except json.JSONDecodeError:
+            continue
+
+        follower_ids = payload.get("attributed_follower_ids") or []
+        if not follower_ids:
+            continue
+
+        attribution = payload.get("attribution") or {}
+        high = int(attribution.get("high", 0) or 0)
+        medium = int(attribution.get("medium", 0) or 0)
+        low = int(attribution.get("low", 0) or 0)
+
+        post_id = payload.get("id")
+        created_at = payload.get("created_at")
+
+        for idx, account_id in enumerate(follower_ids):
+            if idx < high:
+                action_type = "reply"
+            elif idx < high + medium:
+                action_type = "mention"
+            else:
+                action_type = "like"
+            inferred_events.append({
+                "account_id": account_id,
+                "type": action_type,
+                "post_id": post_id,
+                "created_at": created_at,
+                "strength": 0.6,
+                "inferred": True,
+            })
+
+    return _limit_events(inferred_events, limit)
 
 @app.get("/")
 async def root():
@@ -300,7 +411,7 @@ async def list_frames(
     """List available frames."""
     from .models import Frame
     
-    frames = db.query(Frame).filter(
+    frames = db.query(Frame).join(Interval).filter(
         Frame.timeframe_window == timeframe_window
     ).order_by(Frame.created_at.desc()).limit(limit).all()
     
@@ -311,7 +422,11 @@ async def list_frames(
             "timeframe_window": f.timeframe_window,
             "node_count": f.node_count,
             "edge_count": f.edge_count,
-            "created_at": f.created_at.isoformat()
+            "created_at": f.created_at.isoformat(),
+            "interval_start_at": f.interval.start_at.isoformat() if f.interval else None,
+            "interval_end_at": f.interval.end_at.isoformat() if f.interval else None,
+            "new_followers_count": f.interval.new_followers_count if f.interval else 0,
+            "lost_followers_count": f.interval.lost_followers_count if f.interval else 0,
         }
         for f in frames
     ]
@@ -329,6 +444,13 @@ async def get_latest_frame(
     if not frame_data:
         raise HTTPException(status_code=404, detail="No frames available")
     
+    if frame_data and frame_data.get("interval_id"):
+        frame_data["actions"] = _build_action_events(
+            db,
+            interval_id=frame_data["interval_id"],
+            timeframe_window=timeframe_window,
+        )
+
     return frame_data
 
 
@@ -345,6 +467,12 @@ async def get_frame(
     if not frame_data:
         raise HTTPException(status_code=404, detail="Frame not found")
     
+    if frame_data:
+        frame_data["actions"] = _build_action_events(
+            db,
+            interval_id=interval_id,
+            timeframe_window=timeframe_window,
+        )
     return frame_data
 
 
@@ -399,6 +527,13 @@ async def get_graph_data(
             }
         }
     
+    if frame_data and frame_data.get("interval_id"):
+        frame_data["actions"] = _build_action_events(
+            db,
+            interval_id=frame_data["interval_id"],
+            timeframe_window=timeframe_window,
+        )
+
     return frame_data
 
 
@@ -462,7 +597,10 @@ async def get_timeline_frames(
             "node_count": f.node_count,
             "edge_count": f.edge_count,
             "created_at": f.created_at.isoformat(),
-            "interval_end_at": f.interval.end_at.isoformat() if f.interval else None
+            "interval_start_at": f.interval.start_at.isoformat() if f.interval else None,
+            "interval_end_at": f.interval.end_at.isoformat() if f.interval else None,
+            "new_followers_count": f.interval.new_followers_count if f.interval else 0,
+            "lost_followers_count": f.interval.lost_followers_count if f.interval else 0,
         }
         for f in frames
     ]
@@ -546,7 +684,7 @@ async def interpolate_frame(
     # Use edges from appropriate frame based on progress
     edges = to_frame["edges"] if progress > 0.5 else from_frame["edges"]
     
-    return {
+    result = {
         "interval_id": to_interval_id if progress > 0.5 else from_interval_id,
         "timeframe_days": timeframe_window,
         "progress": progress,
@@ -560,6 +698,15 @@ async def interpolate_frame(
             "newFollowers": len([n for n in interpolated_nodes if n.get("isNew")])
         }
     }
+
+    target_interval = result["interval_id"]
+    result["actions"] = _build_action_events(
+        db,
+        interval_id=target_interval,
+        timeframe_window=timeframe_window,
+    )
+
+    return result
 
 
 @app.get("/positions/history")

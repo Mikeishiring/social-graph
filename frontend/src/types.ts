@@ -34,6 +34,15 @@ export interface GraphStats {
   newFollowers?: number;
 }
 
+export interface ActionEvent {
+  account_id: string;
+  type: 'like' | 'reply' | 'mention' | 'quote' | 'retweet' | 'repost';
+  post_id?: string | null;
+  created_at?: string | null;
+  strength?: number;
+  inferred?: boolean;
+}
+
 export interface GraphData {
   interval_id: number;
   timeframe_days: number;
@@ -43,6 +52,7 @@ export interface GraphData {
   edges: GraphEdge[];
   communities: number[];
   stats: GraphStats;
+  actions?: ActionEvent[];
 }
 
 export interface PostMetrics {
@@ -93,4 +103,8 @@ export interface FrameSummary {
   node_count: number;
   edge_count: number;
   created_at: string;
+  interval_start_at?: string | null;
+  interval_end_at?: string | null;
+  new_followers_count?: number;
+  lost_followers_count?: number;
 }

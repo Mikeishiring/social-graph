@@ -26,6 +26,9 @@ Twitter bearer token is loaded from `~/.clawdbot/secrets/twitter.json`:
 
 Or set environment variable: `SOCIAL_GRAPH_TWITTER_BEARER_TOKEN`
 
+Optional (for likes via X API v2):
+`SOCIAL_GRAPH_X_BEARER_TOKEN`
+
 ## CLI Usage
 
 ```bash

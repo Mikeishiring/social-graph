@@ -8,11 +8,13 @@ import NodeTooltip from './components/NodeTooltip';
 import StatsPanel from './components/StatsPanel';
 import TimelineSlider from './components/TimelineSlider';
 import PostPanel from './components/PostPanel';
+import PostScoreboard from './components/PostScoreboard';
 import GraphLegend from './components/GraphLegend';
 import CameraFocus from './components/CameraFocus';
 import { OrbitMode } from './components/effects/OrbitMode';
 import { ConstellationTrails } from './components/effects/ConstellationTrails';
 import EffectsPanel from './components/EffectsPanel';
+import ComparePanel from './components/ComparePanel';
 import { fetchFrame, fetchFrames, fetchGraphData, fetchPosts, fetchStats } from './api';
 import type { GraphData, GraphNode, ApiStats, FrameSummary, PostMarker, GraphEdge } from './types';
 
@@ -59,6 +61,11 @@ export default function App() {
   const [trailsEnabled, setTrailsEnabled] = useState(true);
   const [heartbeatEnabled, setHeartbeatEnabled] = useState(true);
   const [personalityEnabled, setPersonalityEnabled] = useState(true);
+  const [compareMode, setCompareMode] = useState(false);
+  const [compareAIndex, setCompareAIndex] = useState(0);
+  const [compareBIndex, setCompareBIndex] = useState(0);
+  const [compareAData, setCompareAData] = useState<GraphData | null>(null);
+  const [compareBData, setCompareBData] = useState<GraphData | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
@@ -66,10 +73,22 @@ export default function App() {
   const cameraRef = useRef<Camera | null>(null);
   const sceneRef = useRef<Scene | null>(null);
 
+  const compareAddedIds = useMemo(() => {
+    if (!compareAData || !compareBData || !compareMode) return new Set<string>();
+    const idsA = new Set(compareAData.nodes.map((node) => node.id));
+    const idsB = compareBData.nodes.map((node) => node.id);
+    return new Set(idsB.filter((id) => !idsA.has(id)));
+  }, [compareAData, compareBData, compareMode]);
+
   const highlightedNodeIds = useMemo(() => {
-    if (!selectedPost) return new Set<string>();
-    return new Set(selectedPost.attributed_follower_ids);
-  }, [selectedPost]);
+    if (selectedPost) {
+      return new Set(selectedPost.attributed_follower_ids);
+    }
+    if (compareMode) {
+      return compareAddedIds;
+    }
+    return new Set<string>();
+  }, [compareAddedIds, compareMode, selectedPost]);
 
   const allCommunities = useMemo(() => {
     if (!graphData) return [];
@@ -205,11 +224,34 @@ export default function App() {
       setGraphData(resolvedGraphData);
       setUseDemoData(!resolvedGraphData);
       setPosts(postsData);
+      if (resolvedFrames.length > 0) {
+        setCompareAIndex(0);
+        setCompareBIndex(Math.max(resolvedFrames.length - 1, 0));
+      }
       setLoading(false);
     }
 
     loadData();
   }, [timeframe]);
+
+  useEffect(() => {
+    if (!compareMode || frames.length === 0) {
+      setCompareAData(null);
+      setCompareBData(null);
+      return;
+    }
+    const frameA = frames[compareAIndex];
+    const frameB = frames[compareBIndex];
+    if (!frameA || !frameB) return;
+
+    Promise.all([
+      fetchFrame(frameA.interval_id, timeframe),
+      fetchFrame(frameB.interval_id, timeframe),
+    ]).then(([dataA, dataB]) => {
+      setCompareAData(dataA);
+      setCompareBData(dataB);
+    });
+  }, [compareAIndex, compareBIndex, compareMode, frames, timeframe]);
 
   useEffect(() => {
     if (!graphData) return;
@@ -305,6 +347,9 @@ export default function App() {
     setSelectedNode(null);
     setSelectedPost(post);
     setIsPlaying(false);
+    if (compareMode) {
+      setCompareMode(false);
+    }
     const targetIndex = frames.findIndex((frame) => frame.interval_id === post.interval_id);
     if (targetIndex >= 0) {
       setCurrentFrameIndex(targetIndex);
@@ -314,6 +359,9 @@ export default function App() {
   const handleSelectNode = (node: GraphNode) => {
     setSelectedPost(null);
     setSelectedNode(node);
+    if (compareMode) {
+      setCompareMode(false);
+    }
     setCommunityFilterTouched(true);
     setActiveCommunities((prev) => {
       if (prev.has(node.community)) return prev;
@@ -553,6 +601,18 @@ export default function App() {
             </button>
             <button
               type="button"
+              onClick={() => setCompareMode((prev) => !prev)}
+              className={`px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all border ${
+                compareMode
+                  ? 'bg-emerald-500 border-emerald-400 text-white shadow-md'
+                  : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+              }`}
+              title="Compare two intervals"
+            >
+              Compare
+            </button>
+            <button
+              type="button"
               onClick={handleExport}
               className="px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all border bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
             >
@@ -650,6 +710,44 @@ export default function App() {
           <PostPanel
             post={selectedPost}
             onClose={() => setSelectedPost(null)}
+          />
+        )}
+
+        {!selectedPost && !compareMode && (
+          <PostScoreboard
+            posts={posts}
+            selectedPostId={selectedPost?.id ?? null}
+            onSelectPost={handlePostSelect}
+          />
+        )}
+
+        {compareMode && (
+          <ComparePanel
+            frames={frames}
+            compareAIndex={compareAIndex}
+            compareBIndex={compareBIndex}
+            summary={
+              compareAData && compareBData
+                ? (() => {
+                    const idsA = new Set(compareAData.nodes.map((node) => node.id));
+                    const idsB = new Set(compareBData.nodes.map((node) => node.id));
+                    const addedIds = new Set(Array.from(idsB).filter((id) => !idsA.has(id)));
+                    const lostIds = new Set(Array.from(idsA).filter((id) => !idsB.has(id)));
+                    const topNew = compareBData.nodes
+                      .filter((node) => addedIds.has(node.id))
+                      .sort((a, b) => (b.followers || 0) - (a.followers || 0))
+                      .slice(0, 6);
+                    return {
+                      added: addedIds.size,
+                      lost: lostIds.size,
+                      net: addedIds.size - lostIds.size,
+                      topNew,
+                    };
+                  })()
+                : null
+            }
+            onSelectA={(index) => setCompareAIndex(index)}
+            onSelectB={(index) => setCompareBIndex(index)}
           />
         )}
 

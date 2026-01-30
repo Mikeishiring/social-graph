@@ -77,6 +77,17 @@ export const COMMUNITY_COLORS = [
   '#3b82f6', // blue
 ];
 
+// Action ping colors - subtle, distinct
+export const ACTION_COLORS = {
+  like: '#f59e0b',    // amber-500
+  reply: '#3b82f6',   // blue-500
+  mention: '#10b981', // emerald-500
+  quote: '#8b5cf6',   // violet-500
+  retweet: '#22c55e', // green-500
+  repost: '#22c55e',  // green-500
+  default: '#94a3b8', // slate-400
+};
+
 // Legacy exports for compatibility (edges all same color now)
 export const EDGE_TYPE_COLORS: Record<string, string> = {
   direct_interaction: EDGE_COLORS.default,

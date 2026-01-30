@@ -4,6 +4,8 @@
 **Reviewer:** Clawdbot Code Review Subagent  
 **Overall Score:** 10/10 ✅
 
+**Addendum (2026-01-30):** UI added action pings (inferred), growth spikes, post scoreboard, and before/after compare. Collector now ingests replies/quotes/retweeters/mentions; likes are not exposed by the API docs.  
+
 ---
 
 ## Executive Summary
@@ -106,7 +108,7 @@ pytest-cov>=4.1.0
 | M0: Data spine | ✅ Complete | 100% |
 | M1: Frame builder + 3D | ✅ Complete | 100% |
 | M2: Timeline replay | ✅ Complete | 100% |
-| M3: Post overlay | 🔲 Not Started | 0% |
+| M3: Post overlay | 🟡 In Progress (mock + inferred) | 60% |
 
 **Overall: 75%**
 

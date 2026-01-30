@@ -20,6 +20,10 @@ class Settings(BaseSettings):
         default="",
         description="TwitterAPI.io API Key"
     )
+    x_bearer_token: str = Field(
+        default="",
+        description="X API v2 Bearer token (optional, for likes)"
+    )
 
     # Collector settings
     max_top_posts_per_run: int = Field(default=20)
@@ -39,9 +43,13 @@ def get_settings() -> Settings:
     """Get settings - environment variables take priority."""
     # Check environment variable first (set by batch file or .env)
     env_token = os.environ.get("SOCIAL_GRAPH_TWITTER_BEARER_TOKEN", "")
+    env_x_token = os.environ.get("SOCIAL_GRAPH_X_BEARER_TOKEN", "")
 
-    if env_token:
-        return Settings(twitter_bearer_token=env_token)
+    if env_token or env_x_token:
+        return Settings(
+            twitter_bearer_token=env_token,
+            x_bearer_token=env_x_token
+        )
 
     # Fallback to secrets file
     secrets_path = Path.home() / ".clawdbot" / "secrets" / "twitter.json"

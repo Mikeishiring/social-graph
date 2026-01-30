@@ -8,8 +8,9 @@ from sqlalchemy.orm import Session
 import tenacity
 
 from .models import (
-    Run, RawFetch, Account, Post, Snapshot, 
-    SnapshotFollower, SnapshotFollowing, Interval, FollowEvent
+    Run, RawFetch, Account, Post, Snapshot,
+    SnapshotFollower, SnapshotFollowing, Interval, FollowEvent,
+    InteractionEvent, PostEngager
 )
 from .twitter_client import TwitterClient, TwitterAPIError
 from .config import settings
@@ -191,6 +192,400 @@ class Collector:
             self.db.add(account)
 
         return account
+
+    def _parse_datetime(self, date_str: Optional[str]) -> Optional[datetime]:
+        if not date_str:
+            return None
+        try:
+            if "+" in date_str or date_str.endswith("Z"):
+                return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            return datetime.strptime(date_str, "%a %b %d %H:%M:%S %z %Y")
+        except Exception:
+            return None
+
+    def _epoch_seconds(self, dt: Optional[datetime]) -> Optional[int]:
+        if not dt:
+            return None
+        return int(dt.timestamp())
+
+    def _upsert_post(self, tweet: dict, author_id: str) -> Optional[Post]:
+        post_id = tweet.get("id")
+        if not post_id:
+            return None
+
+        created_at = self._parse_datetime(tweet.get("created_at"))
+        metrics = tweet.get("public_metrics") or {}
+        metrics_json = json.dumps(metrics)
+
+        post = self.db.query(Post).filter(Post.post_id == post_id).first()
+        if post:
+            post.author_id = author_id
+            if created_at:
+                post.created_at = created_at
+            post.text = tweet.get("text", "") or ""
+            post.metrics_json = metrics_json
+            post.conversation_id = tweet.get("conversation_id")
+            post.in_reply_to_id = tweet.get("in_reply_to_id")
+            post.last_seen_at = utc_now()
+        else:
+            if not created_at:
+                created_at = utc_now()
+            post = Post(
+                post_id=post_id,
+                author_id=author_id,
+                created_at=created_at,
+                text=tweet.get("text", "") or "",
+                metrics_json=metrics_json,
+                conversation_id=tweet.get("conversation_id"),
+                in_reply_to_id=tweet.get("in_reply_to_id"),
+                last_seen_at=utc_now()
+            )
+            self.db.add(post)
+        return post
+
+    def _load_existing_interaction_keys(self, interval_id: int) -> set[tuple]:
+        rows = self.db.query(InteractionEvent).filter(
+            InteractionEvent.interval_id == interval_id
+        ).all()
+        return {(r.src_id, r.dst_id, r.interaction_type, r.post_id) for r in rows}
+
+    def _load_existing_engager_keys(self, interval_id: int) -> set[tuple]:
+        rows = self.db.query(PostEngager).filter(
+            PostEngager.interval_id == interval_id
+        ).all()
+        return {(r.post_id, r.account_id, r.engager_type) for r in rows}
+
+    def _record_interaction(
+        self,
+        interval_id: int,
+        src_id: str,
+        dst_id: str,
+        interaction_type: str,
+        created_at: datetime,
+        post_id: Optional[str],
+        raw_ref_id: Optional[int],
+        existing: set[tuple]
+    ) -> None:
+        key = (src_id, dst_id, interaction_type, post_id)
+        if key in existing:
+            return
+        existing.add(key)
+        self.db.add(InteractionEvent(
+            interval_id=interval_id,
+            created_at=created_at,
+            src_id=src_id,
+            dst_id=dst_id,
+            interaction_type=interaction_type,
+            post_id=post_id,
+            raw_ref_id=raw_ref_id
+        ))
+
+    def _record_engager(
+        self,
+        interval_id: int,
+        post_id: str,
+        account_id: str,
+        engager_type: str,
+        existing: set[tuple]
+    ) -> None:
+        key = (post_id, account_id, engager_type)
+        if key in existing:
+            return
+        existing.add(key)
+        self.db.add(PostEngager(
+            interval_id=interval_id,
+            post_id=post_id,
+            account_id=account_id,
+            engager_type=engager_type
+        ))
+
+    async def collect_posts_and_engagement(
+        self,
+        user_id: str,
+        username: Optional[str],
+        interval: Optional[Interval]
+    ) -> None:
+        if not interval:
+            logger.info("No interval available; skipping engagement collection")
+            return
+
+        interval_id = interval.interval_id
+        since_time = self._epoch_seconds(interval.start_at)
+        until_time = self._epoch_seconds(interval.end_at)
+
+        existing_interactions = self._load_existing_interaction_keys(interval_id)
+        existing_engagers = self._load_existing_engager_keys(interval_id)
+
+        # Collect recent tweets for the ego user
+        collected_posts: list[Post] = []
+        post_limit = settings.max_top_posts_per_run
+
+        async for tweets, cursor_in, cursor_out, truncated in self.twitter.paginate_user_last_tweets(
+            user_id=user_id,
+            username=username,
+            include_replies=False
+        ):
+            raw = self._store_raw_fetch(
+                endpoint="twitter/user/last_tweets",
+                params={"userName": username, "userId": user_id, "cursor": cursor_in},
+                cursor_in=cursor_in,
+                cursor_out=cursor_out,
+                truncated=bool(truncated),
+                payload={"tweets": tweets}
+            )
+            self.db.flush()
+            raw_id = raw.id
+
+            for tweet in tweets:
+                post = self._upsert_post(tweet, user_id)
+                if post:
+                    collected_posts.append(post)
+                if len(collected_posts) >= post_limit:
+                    break
+
+            self.db.commit()
+
+            if len(collected_posts) >= post_limit:
+                break
+
+        # Collect engagement for top posts
+        engager_limit = settings.max_engagers_per_post
+
+        for post in collected_posts:
+            # Replies
+            reply_count = 0
+            async for replies, cursor_in, cursor_out, truncated in self.twitter.paginate_tweet_replies(
+                tweet_id=post.post_id,
+                since_time=since_time,
+                until_time=until_time
+            ):
+                raw = self._store_raw_fetch(
+                    endpoint="twitter/tweet/replies",
+                    params={"tweetId": post.post_id, "cursor": cursor_in, "sinceTime": since_time, "untilTime": until_time},
+                    cursor_in=cursor_in,
+                    cursor_out=cursor_out,
+                    truncated=bool(truncated),
+                    payload={"replies": replies}
+                )
+                self.db.flush()
+                raw_id = raw.id
+
+                for reply in replies:
+                    author = reply.get("author")
+                    if not author or not author.get("id"):
+                        continue
+                    author_account = self._upsert_account(author)
+                    created_at = self._parse_datetime(reply.get("created_at")) or utc_now()
+                    self._record_interaction(
+                        interval_id=interval_id,
+                        src_id=author_account.account_id,
+                        dst_id=user_id,
+                        interaction_type="reply",
+                        created_at=created_at,
+                        post_id=post.post_id,
+                        raw_ref_id=raw_id,
+                        existing=existing_interactions
+                    )
+                    self._record_engager(
+                        interval_id=interval_id,
+                        post_id=post.post_id,
+                        account_id=author_account.account_id,
+                        engager_type="reply",
+                        existing=existing_engagers
+                    )
+                    reply_count += 1
+                    if reply_count >= engager_limit:
+                        break
+
+                self.db.commit()
+                if reply_count >= engager_limit:
+                    break
+
+            # Quotes
+            quote_count = 0
+            async for quotes, cursor_in, cursor_out, truncated in self.twitter.paginate_tweet_quotes(
+                tweet_id=post.post_id,
+                since_time=since_time,
+                until_time=until_time,
+                include_replies=True
+            ):
+                raw = self._store_raw_fetch(
+                    endpoint="twitter/tweet/quotes",
+                    params={"tweetId": post.post_id, "cursor": cursor_in, "sinceTime": since_time, "untilTime": until_time},
+                    cursor_in=cursor_in,
+                    cursor_out=cursor_out,
+                    truncated=bool(truncated),
+                    payload={"tweets": quotes}
+                )
+                self.db.flush()
+                raw_id = raw.id
+
+                for quote in quotes:
+                    author = quote.get("author")
+                    if not author or not author.get("id"):
+                        continue
+                    author_account = self._upsert_account(author)
+                    created_at = self._parse_datetime(quote.get("created_at")) or utc_now()
+                    self._record_interaction(
+                        interval_id=interval_id,
+                        src_id=author_account.account_id,
+                        dst_id=user_id,
+                        interaction_type="quote",
+                        created_at=created_at,
+                        post_id=post.post_id,
+                        raw_ref_id=raw_id,
+                        existing=existing_interactions
+                    )
+                    self._record_engager(
+                        interval_id=interval_id,
+                        post_id=post.post_id,
+                        account_id=author_account.account_id,
+                        engager_type="quote",
+                        existing=existing_engagers
+                    )
+                    quote_count += 1
+                    if quote_count >= engager_limit:
+                        break
+
+                self.db.commit()
+                if quote_count >= engager_limit:
+                    break
+
+            # Retweeters
+            retweet_count = 0
+            async for users, cursor_in, cursor_out, truncated in self.twitter.paginate_tweet_retweeters(
+                tweet_id=post.post_id
+            ):
+                raw = self._store_raw_fetch(
+                    endpoint="twitter/tweet/retweeters",
+                    params={"tweetId": post.post_id, "cursor": cursor_in},
+                    cursor_in=cursor_in,
+                    cursor_out=cursor_out,
+                    truncated=bool(truncated),
+                    payload={"users": users}
+                )
+                self.db.flush()
+                raw_id = raw.id
+
+                for user in users:
+                    if not user.get("id"):
+                        continue
+                    account = self._upsert_account(user)
+                    created_at = interval.end_at or utc_now()
+                    self._record_interaction(
+                        interval_id=interval_id,
+                        src_id=account.account_id,
+                        dst_id=user_id,
+                        interaction_type="retweet",
+                        created_at=created_at,
+                        post_id=post.post_id,
+                        raw_ref_id=raw_id,
+                        existing=existing_interactions
+                    )
+                    self._record_engager(
+                        interval_id=interval_id,
+                        post_id=post.post_id,
+                        account_id=account.account_id,
+                        engager_type="retweet",
+                        existing=existing_engagers
+                    )
+                    retweet_count += 1
+                    if retweet_count >= engager_limit:
+                        break
+
+                self.db.commit()
+                if retweet_count >= engager_limit:
+                    break
+
+            # Likers (X API v2)
+            if self.twitter.has_x_api():
+                like_count = 0
+                async for users, cursor_in, cursor_out, truncated in self.twitter.paginate_tweet_liking_users(
+                    tweet_id=post.post_id
+                ):
+                    raw = self._store_raw_fetch(
+                        endpoint="x/tweets/liking_users",
+                        params={"tweetId": post.post_id, "cursor": cursor_in},
+                        cursor_in=cursor_in,
+                        cursor_out=cursor_out,
+                        truncated=bool(truncated),
+                        payload={"users": users}
+                    )
+                    self.db.flush()
+                    raw_id = raw.id
+
+                    for user in users:
+                        if not user.get("id"):
+                            continue
+                        account = self._upsert_account(user)
+                        created_at = interval.end_at or utc_now()
+                        self._record_interaction(
+                            interval_id=interval_id,
+                            src_id=account.account_id,
+                            dst_id=user_id,
+                            interaction_type="like",
+                            created_at=created_at,
+                            post_id=post.post_id,
+                            raw_ref_id=raw_id,
+                            existing=existing_interactions
+                        )
+                        self._record_engager(
+                            interval_id=interval_id,
+                            post_id=post.post_id,
+                            account_id=account.account_id,
+                            engager_type="like",
+                            existing=existing_engagers
+                        )
+                        like_count += 1
+                        if like_count >= engager_limit:
+                            break
+
+                    self.db.commit()
+                    if like_count >= engager_limit:
+                        break
+
+        # Mentions
+        if username:
+            mention_count = 0
+            async for mentions, cursor_in, cursor_out, truncated in self.twitter.paginate_user_mentions(
+                username=username,
+                since_time=since_time,
+                until_time=until_time
+            ):
+                raw = self._store_raw_fetch(
+                    endpoint="twitter/user/mentions",
+                    params={"userName": username, "cursor": cursor_in, "sinceTime": since_time, "untilTime": until_time},
+                    cursor_in=cursor_in,
+                    cursor_out=cursor_out,
+                    truncated=bool(truncated),
+                    payload={"tweets": mentions}
+                )
+                self.db.flush()
+                raw_id = raw.id
+
+                for mention in mentions:
+                    author = mention.get("author")
+                    if not author or not author.get("id"):
+                        continue
+                    author_account = self._upsert_account(author)
+                    created_at = self._parse_datetime(mention.get("created_at")) or utc_now()
+                    self._record_interaction(
+                        interval_id=interval_id,
+                        src_id=author_account.account_id,
+                        dst_id=user_id,
+                        interaction_type="mention",
+                        created_at=created_at,
+                        post_id=mention.get("id"),
+                        raw_ref_id=raw_id,
+                        existing=existing_interactions
+                    )
+                    mention_count += 1
+                    if mention_count >= settings.max_engagers_per_post:
+                        break
+
+                self.db.commit()
+                if mention_count >= settings.max_engagers_per_post:
+                    break
     
     @api_retry
     async def collect_followers(self, user_id: str, max_pages: int = None, username: str = None) -> Snapshot:
@@ -402,7 +797,18 @@ class Collector:
                 following_interval = self.compute_interval_diff(
                     prev_following, following_snapshot
                 )
-            
+
+            # Collect posts + engagement events for attribution (best effort)
+            interaction_interval = follower_interval or following_interval
+            try:
+                await self.collect_posts_and_engagement(
+                    user_id=user_id,
+                    username=username,
+                    interval=interaction_interval
+                )
+            except Exception as e:
+                logger.warning(f"Engagement collection failed: {e}")
+
             self._finish_run("completed")
             
             return {

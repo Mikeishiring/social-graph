@@ -13,6 +13,7 @@ import { playHoverSound, playClickSound, playBubblePopSound } from '../sounds';
 import { HeartbeatPulse } from './effects/HeartbeatPulse';
 import { NodePersonality } from './effects/NodePersonality';
 import { RippleEffect } from './effects/RippleEffect';
+import ActionPings from './effects/ActionPings';
 
 interface GraphViewerProps {
   data: GraphData;
@@ -809,6 +810,13 @@ export default function GraphViewer({
           baseSize={5}
         />
       )}
+
+      {/* Action pings (engagement pulses) */}
+      <ActionPings
+        events={data.actions ?? []}
+        nodeMap={nodeMap}
+        enabled={!selectedNode}
+      />
 
       {/* Ripple effect on node click */}
       <RippleEffect
