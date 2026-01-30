@@ -264,7 +264,7 @@ class TestCollectFollowersRetry:
             nonlocal call_count
             call_count += 1
             if call_count < 2:
-                raise TwitterAPIError("Rate limited", status_code=429)
+                raise TwitterAPIError(429, "Rate limited")
             yield [
                 {"id": "1", "username": "user1", "name": "User 1", "public_metrics": {}}
             ], None, None, False
