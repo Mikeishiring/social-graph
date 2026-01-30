@@ -56,6 +56,25 @@ class TwitterClient:
         sorted_params = json.dumps(params, sort_keys=True)
         return hashlib.sha256(sorted_params.encode()).hexdigest()[:16]
 
+    def _extract_list(self, payload: dict, key: str) -> list:
+        """Extract list payloads from twitterapi.io responses."""
+        if not payload:
+            return []
+
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+
+        data = payload.get("data")
+        if isinstance(data, dict):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+        elif isinstance(data, list):
+            return data
+
+        return []
+
     async def _request(
         self,
         method: str,
@@ -148,7 +167,7 @@ class TwitterClient:
             data = await self._request("GET", "/twitter/user/followers", params)
 
             # Normalize user data from twitterapi.io format
-            raw_users = data.get("followers", [])
+            raw_users = self._extract_list(data, "followers")
             users = [self._normalize_user(u) for u in raw_users]
 
             cursor_out = data.get("next_cursor")
@@ -190,7 +209,7 @@ class TwitterClient:
             data = await self._request("GET", "/twitter/user/followings", params)
 
             # Normalize user data from twitterapi.io format
-            raw_users = data.get("followings", [])
+            raw_users = self._extract_list(data, "followings")
             users = [self._normalize_user(u) for u in raw_users]
 
             cursor_out = data.get("next_cursor")
@@ -277,7 +296,7 @@ class TwitterClient:
             params["userId"] = user_id
 
         data = await self._request("GET", "/twitter/user/last_tweets", params)
-        tweets = data.get("tweets", [])
+        tweets = self._extract_list(data, "tweets")
         return [self._normalize_tweet(t) for t in tweets]
 
     async def paginate_user_last_tweets(
@@ -307,7 +326,7 @@ class TwitterClient:
 
             cursor_in = cursor
             data = await self._request("GET", "/twitter/user/last_tweets", params)
-            raw_tweets = data.get("tweets", [])
+            raw_tweets = self._extract_list(data, "tweets")
             tweets = [self._normalize_tweet(t) for t in raw_tweets]
 
             cursor_out = data.get("next_cursor") or ""
@@ -346,7 +365,7 @@ class TwitterClient:
 
             cursor_in = cursor
             data = await self._request("GET", "/twitter/tweet/replies", params)
-            raw_tweets = data.get("replies", []) or data.get("tweets", [])
+            raw_tweets = self._extract_list(data, "replies") or self._extract_list(data, "tweets")
             tweets = [self._normalize_tweet(t) for t in raw_tweets]
             cursor_out = data.get("next_cursor") or ""
 
@@ -386,7 +405,7 @@ class TwitterClient:
 
             cursor_in = cursor
             data = await self._request("GET", "/twitter/tweet/quotes", params)
-            raw_tweets = data.get("tweets", [])
+            raw_tweets = self._extract_list(data, "tweets")
             tweets = [self._normalize_tweet(t) for t in raw_tweets]
             cursor_out = data.get("next_cursor") or ""
 
@@ -418,7 +437,7 @@ class TwitterClient:
 
             cursor_in = cursor
             data = await self._request("GET", "/twitter/tweet/retweeters", params)
-            raw_users = data.get("users", [])
+            raw_users = self._extract_list(data, "users")
             users = [self._normalize_user(u) for u in raw_users]
             cursor_out = data.get("next_cursor") or ""
 
@@ -456,7 +475,7 @@ class TwitterClient:
 
             cursor_in = cursor
             data = await self._request("GET", "/twitter/user/mentions", params)
-            raw_tweets = data.get("tweets", [])
+            raw_tweets = self._extract_list(data, "tweets")
             tweets = [self._normalize_tweet(t) for t in raw_tweets]
             cursor_out = data.get("next_cursor") or ""
 
