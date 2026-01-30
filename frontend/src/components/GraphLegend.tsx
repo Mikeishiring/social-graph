@@ -1,5 +1,5 @@
 import type { GraphData, GraphEdge } from '../types';
-import { COMMUNITY_COLORS, EDGE_TYPE_LABELS } from '../graphTheme';
+import { ACTION_COLORS, COMMUNITY_COLORS, EDGE_TYPE_LABELS } from '../graphTheme';
 
 type EdgeFilterState = Record<GraphEdge['type'], boolean>;
 
@@ -35,6 +35,15 @@ export default function GraphLegend({
   const communities = Array.from(
     new Set(graphData.nodes.map((node) => node.community))
   ).sort((a, b) => a - b);
+  const actionItems = [
+    { key: 'reply', label: 'Reply' },
+    { key: 'mention', label: 'Mention' },
+    { key: 'quote', label: 'Quote' },
+    { key: 'retweet', label: 'Repost' },
+    { key: 'like', label: 'Like' },
+  ] as const;
+  const hasActions = Boolean(graphData.actions && graphData.actions.length > 0);
+  const hasInferredActions = Boolean(graphData.actions?.some((action) => action.inferred));
   const activeCount = activeCommunities.size;
   const totalCount = communities.length;
   const visibilityClass = isOpen ? 'block' : 'hidden sm:block';
@@ -120,6 +129,28 @@ export default function GraphLegend({
             );
           })}
         </div>
+      </div>
+
+      <div className="mt-4">
+        <p className="panel-title mb-2">Action Pings</p>
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          {actionItems.map((item) => (
+            <div key={item.key} className="flex items-center gap-2 text-slate-600">
+              <span
+                className="w-2.5 h-2.5 rounded-full border border-slate-300"
+                style={{ backgroundColor: ACTION_COLORS[item.key] ?? ACTION_COLORS.default }}
+              />
+              <span>{item.label}</span>
+            </div>
+          ))}
+        </div>
+        <p className="text-[11px] text-slate-400 mt-2">
+          {hasActions
+            ? (hasInferredActions
+              ? 'Some pings are inferred when engagement data is missing.'
+              : 'Pings reflect real engagement events.')
+            : 'No action pings for this frame yet.'}
+        </p>
       </div>
 
       <div className="mt-4 pt-3 border-t border-slate-200">

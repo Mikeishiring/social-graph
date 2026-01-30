@@ -32,6 +32,7 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [posts, setPosts] = useState<PostMarker[]>([]);
+  const [postMode, setPostMode] = useState<'real' | 'auto' | 'mock'>('real');
   const [selectedPost, setSelectedPost] = useState<PostMarker | null>(null);
   const [legendOpen, setLegendOpen] = useState(false);
   const [edgeFilters, setEdgeFilters] = useState<Record<GraphEdge['type'], boolean>>({
@@ -189,7 +190,7 @@ export default function App() {
       const [framesData, statsData, postsData] = await Promise.all([
         fetchFrames(timeframe, 200),
         fetchStats(),
-        fetchPosts(timeframe, 200),
+        fetchPosts(timeframe, 200, postMode),
       ]);
 
       setStats(statsData);
@@ -232,7 +233,7 @@ export default function App() {
     }
 
     loadData();
-  }, [timeframe]);
+  }, [postMode, timeframe]);
 
   useEffect(() => {
     if (!compareMode || frames.length === 0) {
@@ -718,6 +719,8 @@ export default function App() {
             posts={posts}
             selectedPostId={selectedPost?.id ?? null}
             onSelectPost={handlePostSelect}
+            mode={postMode}
+            onModeChange={setPostMode}
           />
         )}
 
