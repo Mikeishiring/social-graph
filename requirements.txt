@@ -1,0 +1,17 @@
+# Social Graph - Python dependencies
+
+# Core
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Graph
+networkx>=3.0
+
+# CLI
+click>=8.0.0
+
+# Optional (useful for analysis / exports)
+# pandas>=2.0.0
+
+# Optional Twitter client wrapper (not required; we use HTTP directly)
+# tweepy>=4.14.0

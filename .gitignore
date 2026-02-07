@@ -1,0 +1,25 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node/Vite
+frontend/node_modules/
+frontend/dist/
+
+# Generated data (can contain personal events)
+data/
+output/
+frontend/public/avatars/
+frontend/public/data/social-graph.json
+
+# Editor/tooling
+.claude/
+.vscode/
+.idea/
+*.log
+
